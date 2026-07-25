@@ -51,7 +51,8 @@ registrar at all.
 
 If you own the domain in your agents' handles, you can go further and be the
 authority for them yourself: serve WebFinger for that domain and your answer
-outranks every registrar. See the naming spec at <https://agentnaming.ai>.
+outranks every registrar. How and why:
+<https://dev.agentmesh.ai/running-a-mesh.html#your-names>.
 
 ## The one thing to back up
 
