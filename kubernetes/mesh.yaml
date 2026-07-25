@@ -1,0 +1,332 @@
+# A mesh on Kubernetes.
+#
+#   kubectl create namespace agentmesh
+#   # credentials come from OUTSIDE the cluster: see the README
+#   kubectl -n agentmesh create secret generic mesh-config --from-file=accounts.conf=./accounts.conf
+#   kubectl -n agentmesh create secret generic services-creds --from-file=services.creds=./creds/services.creds
+#   kubectl -n agentmesh create secret generic sandbox-pool --from-file=./creds/pool/
+#   kubectl -n agentmesh apply -f mesh.yaml
+#
+# The shape to understand before reading further: everything here is either
+# ELASTIC or BALLAST, and they are different Kubernetes objects on purpose.
+#
+#   elastic  the services and the console. Stateless, their state lives in
+#            JetStream, they attach as NATS queue-group subscribers. Scale them
+#            freely; an autoscaler belongs here.
+#   ballast  nats. Raft-replicated JetStream. The replica count is a decision,
+#            not a dial. An autoscaler pointed at this will eventually eat data.
+#
+# Never let one scaler see both.
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-config
+  namespace: agentmesh
+data:
+  nats.conf: |
+    server_name: $POD_NAME
+    port: 4222
+    http: 8222
+
+    jetstream {
+      store_dir: "/data/jetstream"
+      max_mem: 1G
+      max_file: 8G
+    }
+
+    websocket {
+      port: 4443
+      no_tls: true   # TLS terminates at the ingress. See the README.
+    }
+
+    cluster {
+      name: agentmesh
+      port: 6222
+      routes: [
+        nats://nats-0.nats.agentmesh.svc.cluster.local:6222
+        nats://nats-1.nats.agentmesh.svc.cluster.local:6222
+        nats://nats-2.nats.agentmesh.svc.cluster.local:6222
+      ]
+    }
+
+    # Bare filename, not a path. nats-server resolves includes RELATIVE to the
+    # directory holding the config, so an absolute path here gets appended to
+    # that directory and becomes /etc/nats/etc/... which does not exist. Both
+    # files therefore have to land in the same directory, which is what the
+    # projected volume below is for: nats.conf from a ConfigMap and
+    # accounts.conf from a Secret, presented as one directory.
+    include "accounts.conf"
+
+---
+# Headless, so each pod gets a stable DNS name for the cluster routes above.
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  namespace: agentmesh
+spec:
+  clusterIP: None
+  # REQUIRED, and a deadlock if omitted: a headless service publishes DNS only
+  # for READY pods by default, but these pods cannot become ready until they
+  # have clustered with each other, and cannot cluster until they can resolve
+  # each other. Without this they spin on "no such host" until the liveness
+  # probe kills them, and the cluster never forms.
+  publishNotReadyAddresses: true
+  selector:
+    app: nats
+  ports:
+    - { name: client, port: 4222 }
+    - { name: cluster, port: 6222 }
+    - { name: websocket, port: 4443 }
+    - { name: monitor, port: 8222 }
+
+---
+# What everything else connects to.
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats-client
+  namespace: agentmesh
+spec:
+  selector:
+    app: nats
+  ports:
+    - { name: client, port: 4222, targetPort: 4222 }
+    - { name: websocket, port: 4443, targetPort: 4443 }
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nats
+  namespace: agentmesh
+spec:
+  serviceName: nats
+  # Three, and an odd number, because JetStream replication is Raft: quorum is
+  # two of three. Changing this is a migration, not an edit — see the README's
+  # scale-in runbook before touching it.
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app: nats }
+  template:
+    metadata:
+      labels: { app: nats }
+    spec:
+      # Three replicas on two nodes loses quorum when one node drains, which is
+      # the whole point of having three. Spread them.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: { app: nats }
+      # Long enough for lame duck below to finish handing clients off.
+      terminationGracePeriodSeconds: 75
+      containers:
+        - name: nats
+          image: nats:2.10-alpine
+          args: ["-c", "/etc/nats/nats.conf", "--name", "$(POD_NAME)"]
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef: { fieldPath: metadata.name }
+          ports:
+            - { name: client, containerPort: 4222 }
+            - { name: cluster, containerPort: 6222 }
+            - { name: websocket, containerPort: 4443 }
+            - { name: monitor, containerPort: 8222 }
+          lifecycle:
+            preStop:
+              # Lame duck: stop accepting, tell connected clients to reconnect
+              # elsewhere, then exit. Without this a rolling restart looks like
+              # an outage to every agent.
+              exec:
+                command: ["nats-server", "--signal", "ldm=/var/run/nats/nats.pid"]
+          volumeMounts:
+            - { name: config, mountPath: /etc/nats, readOnly: true }
+            - { name: data, mountPath: /data }
+            - { name: pid, mountPath: /var/run/nats }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8222 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          # Liveness must NOT use /healthz. While the cluster is forming and
+          # JetStream is recovering, /healthz reports unhealthy, so liveness on it
+          # kills the pod mid-formation and the cluster never converges. /varz
+          # answers as soon as the server is listening, which is what liveness
+          # should mean. /healthz stays on readiness, where it gates traffic.
+          livenessProbe:
+            httpGet: { path: /varz, port: 8222 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 6
+          startupProbe:
+            httpGet: { path: /varz, port: 8222 }
+            failureThreshold: 30
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 250m, memory: 1Gi }
+            limits: { cpu: "1", memory: 2Gi }
+      volumes:
+        # nats.conf and accounts.conf must sit in ONE directory, because
+        # nats-server resolves an include relative to the config it is reading.
+        # A projected volume is how two different sources become one directory.
+        - name: config
+          projected:
+            sources:
+              # Note `name`, not `secretName`. A projected source is a different
+              # type from a secret volume, and uses `name` for both kinds.
+              - configMap: { name: nats-config }
+              - secret: { name: mesh-config }
+        - name: pid
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: services
+  namespace: agentmesh
+spec:
+  # Safe to raise: the services attach as queue-group subscribers, so NATS
+  # balances across them and unacked work redelivers if one dies. One caveat in
+  # the README about the activity service's local counters.
+  replicas: 1
+  selector:
+    matchLabels: { app: services }
+  template:
+    metadata:
+      labels: { app: services }
+    spec:
+      # A new PersistentVolume is mounted root-owned, which masks the ownership
+      # the image set up and gives the non-root user EACCES on first write.
+      # fsGroup makes the volume group-writable for this gid. The image runs as
+      # uid/gid 1000 (the node user).
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: services
+          image: ghcr.io/jeffrschneider/agentmesh-services:0.2.0
+          env:
+            - name: NATS_URL
+              value: nats://nats-client.agentmesh.svc.cluster.local:4222
+            - name: NATS_CREDS
+              value: /creds/services.creds
+            - name: CREDS_DIR
+              value: /creds/pool
+            - name: USAGE_DB_PATH
+              value: /var/lib/agentmesh/usage.db
+            - name: MESH_OPERATOR_AUTH_FILE
+              value: /var/lib/agentmesh/operator-auth.json
+            - name: MESH_OPERATOR_ID
+              value: operator
+            # No password set, so the first start invents one and prints it:
+            #   kubectl -n agentmesh logs deploy/services | grep -A6 "OPERATOR CONSOLE LOGIN"
+            # There is deliberately no default: this image is public and this
+            # login can mint credentials.
+          ports:
+            - { name: api, containerPort: 3001 }
+          volumeMounts:
+            - { name: creds, mountPath: /creds/services.creds, subPath: services.creds, readOnly: true }
+            - { name: pool, mountPath: /creds/pool, readOnly: true }
+            - { name: state, mountPath: /var/lib/agentmesh }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 3001 }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { cpu: "1", memory: 1Gi }
+      volumes:
+        - name: creds
+          secret: { secretName: services-creds }
+        - name: pool
+          secret: { secretName: sandbox-pool }
+        # The activity service keeps usage counters, and the entrypoint writes
+        # the console login hash, both here. Per-replica: see the README before
+        # raising replicas above one.
+        - name: state
+          persistentVolumeClaim: { claimName: services-state }
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: services-state
+  namespace: agentmesh
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: services
+  namespace: agentmesh
+spec:
+  selector:
+    app: services
+  ports:
+    - { name: api, port: 3001, targetPort: 3001 }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: console
+  namespace: agentmesh
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: console }
+  template:
+    metadata:
+      labels: { app: console }
+    spec:
+      containers:
+        - name: console
+          image: ghcr.io/jeffrschneider/agentmesh-console:0.2.0
+          env:
+            # Resolved by the BROWSER, so these are the addresses a user's
+            # machine can reach, never in-cluster service names. Set them to
+            # your ingress hostnames; the placeholders below only work for
+            # kubectl port-forward.
+            - name: API_URL
+              value: http://localhost:3001
+            - name: NATS_WS_URL
+              value: ws://localhost:4443
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /config.js, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 200m, memory: 256Mi }
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: console
+  namespace: agentmesh
+spec:
+  selector:
+    app: console
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }

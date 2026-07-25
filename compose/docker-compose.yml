@@ -1,0 +1,117 @@
+# A complete AgentMesh instance on one host.
+#
+#   docker compose up -d
+#
+# Brings up a broker with JetStream, the platform services, and the operator
+# console, and mints its own operator keys on first run. Nothing to clone, no
+# credentials to prepare by hand.
+#
+#   console  http://localhost:8080
+#   api      http://localhost:3001
+#   mesh     nats://localhost:4222   ws://localhost:4443
+#
+# This is a single-host deployment with no TLS. Good for evaluating, for a
+# private mesh behind a firewall, and for a branch office. Before anyone outside
+# your network reaches it, put a reverse proxy in front and read the TLS section
+# of the README: the browser console has to talk wss:// to the mesh, and an
+# https page is not allowed to open a ws:// connection.
+
+name: agentmesh
+
+services:
+  # Mints the operator -> account -> user chain on first run, then exits. Later
+  # starts find the config already there and do nothing.
+  bootstrap:
+    image: natsio/nats-box:0.14.5
+    volumes:
+      - mesh-data:/data
+      - ./bootstrap.sh:/bootstrap.sh:ro
+    environment:
+      MESH_NAME: ${MESH_NAME:-agentmesh}
+      MESH_WS_PORT: "4443"
+      SANDBOX_POOL_SIZE: ${SANDBOX_POOL_SIZE:-5}
+    entrypoint: ["sh", "/bootstrap.sh"]
+    restart: "no"
+
+  nats:
+    image: nats:2.10-alpine
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    command: ["-c", "/data/nats.conf"]
+    volumes:
+      - mesh-data:/data
+      # JetStream on its own volume, because it is the only thing here whose
+      # loss actually costs you something.
+      - mesh-jetstream:/jetstream
+    ports:
+      - "4222:4222"   # agents and services, TCP
+      - "4443:4443"   # agents in a browser, WebSocket
+    restart: unless-stopped
+    healthcheck:
+      # nats-server has no shell; the alpine image does. A TCP connect is enough
+      # to know it is accepting, which is what dependents are waiting for.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 4222 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  services:
+    image: ghcr.io/jeffrschneider/agentmesh-services:${AGENTMESH_VERSION:-0.2.0}
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_CREDS: /data/creds/services.creds
+      CREDS_DIR: /data/creds/pool
+      USAGE_DB_PATH: /var/lib/agentmesh/usage.db
+      # The operator console login. Leave the password unset and the container
+      # invents one on first start and prints it in the log:
+      #
+      #   docker compose logs services | grep -A6 "OPERATOR CONSOLE LOGIN"
+      #
+      # There is no default password on purpose. This image is public and this
+      # login can mint credentials, so a shipped admin/admin would be a published
+      # credential on every copy of it.
+      MESH_OPERATOR_ID: ${MESH_OPERATOR_ID:-operator}
+      MESH_OPERATOR_PASSWORD: ${MESH_OPERATOR_PASSWORD:-}
+      MESH_OPERATOR_AUTH_FILE: /var/lib/agentmesh/operator-auth.json
+      # Optional, and separate from the login above: a shared secret for calling
+      # the operator API directly, without a browser. The login alone is enough
+      # to arm the surface, so most deployments never need this.
+      MESH_OPERATOR_KEY: ${MESH_OPERATOR_KEY:-}
+      # Optional: durable history in Postgres for the console's charts. Unset
+      # means history is simply not recorded; nothing else changes.
+      METRICS_DB_URL: ${METRICS_DB_URL:-}
+    volumes:
+      - mesh-data:/data:ro
+      - mesh-usage:/var/lib/agentmesh
+    ports:
+      - "3001:3001"   # api gateway, and what the console talks to
+    restart: unless-stopped
+
+  console:
+    image: ghcr.io/jeffrschneider/agentmesh-console:${AGENTMESH_VERSION:-0.2.0}
+    depends_on:
+      - services
+    environment:
+      # These are resolved by the BROWSER, not by this container, so they are
+      # host addresses rather than compose service names. Getting this wrong is
+      # the single easiest mistake here: `nats` and `services` mean nothing
+      # outside the compose network.
+      API_URL: ${PUBLIC_API_URL:-http://localhost:3001}
+      NATS_WS_URL: ${PUBLIC_NATS_WS_URL:-ws://localhost:4443}
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+volumes:
+  # Operator keys, account JWTs, credentials, server config. This is the one to
+  # back up: lose it and every agent credential has to be reissued.
+  mesh-data:
+  # Streams and KV: the registry, tasks, rooms.
+  mesh-jetstream:
+  # Per-agent usage counters (SQLite). Rebuildable, so losing it costs history,
+  # not function.
+  mesh-usage:
