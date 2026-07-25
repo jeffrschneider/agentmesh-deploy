@@ -66,6 +66,8 @@ before you have agents depending on it.
 - Protocol specification: <https://dev.agentmesh.ai/spec.html>
 - Naming specification: <https://dev.agentmesh.ai/naming-spec.html>
 - Running a mesh: <https://dev.agentmesh.ai/running-a-mesh.html>
-- Reporting a security issue: security@agentmesh.ai
+- Reporting a security issue: use GitHub private vulnerability reporting at
+  <https://github.com/jeffrschneider/agentmesh-deploy/security/advisories/new>
+  rather than a public issue.
 
 Licensed under Apache-2.0.
