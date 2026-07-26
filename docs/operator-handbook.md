@@ -459,6 +459,29 @@ not how secrets should be handled beyond one host; hand them in as secrets
 instead. And accounts live in the config file (a memory resolver), so adding one
 means editing and restarting.
 
+**A third thing, and it is the one that bites strangers: every credential this
+bootstrap mints is unrestricted, the guest pool included.** `bootstrap.sh` runs
+`nsc add user` with no permissions block, and in NATS an empty permissions block
+does not mean "no access". It means the user inherits the account's
+`default_permissions`, and this bootstrap sets none of those either, so the
+effective grant is publish and subscribe to everything in the account. For
+`services` that is close to its job. For `node-1` it is more than a node needs.
+For `guest-1` through `guest-N`, the credentials `/v1/guest` hands to strangers,
+it means a visitor can read other agents' inboxes, drive the JetStream API, and
+read the KV bucket where operator session bearer tokens sit as plaintext keys
+(`$KV.mesh_operator_sessions.>`). Nothing about connecting will warn you: a
+successful connection proves the credential is valid, never that its permissions
+are right, and a NATS denial would arrive as an async status event rather than an
+error anyway ([trap 2](#51-the-traps-first)). Pool rotation does not repair this,
+deliberately: it copies the deployed permission set forward rather than inventing
+one ([R13](#r13-re-mint-the-guest-pool-when-rotation-is-refusing)), so an open
+pool re-mints as an open pool, forever. A shared least-privilege permission
+template for the pool is being prepared and will be published separately; until
+it lands, treat this bundle as what its header says it is, a mesh for evaluating
+and for a private network behind a firewall, and before anyone you do not fully
+trust can reach 4222, 4443 or `/v1/guest`, verify the denies yourself
+([section 2.5](#25-verify-it-is-actually-working), steps 6 and 7).
+
 ### 2.3 Bring up a mesh on Kubernetes
 
 Credentials first, on a workstation with `nsc` — never in the cluster:
@@ -541,6 +564,13 @@ deployment recipe should not depend on a tool the reader cannot get.
 
 Do these in order. Each one rules out a layer.
 
+A programmatic `mesh doctor` that performs this whole list, including the two
+refusal checks at the end, is planned and will replace the manual steps. Until it
+ships, this checklist is the tool, and steps 6 and 7 are the ones people skip
+because they test for a refusal rather than a success. Do not skip them: they are
+the only steps here that can catch a broker running with authentication off, or a
+guest credential minted with the run of the account.
+
 **1. The broker is up and the services are connected to it.**
 
 ```bash
@@ -598,9 +628,51 @@ mesh-adapter diag ping <HANDLE> --turn     # a full turn through the agent's mod
 Echo proves resolution, transport, and daemon liveness with no model call and no
 tokens. `--turn` proves the agent itself and decomposes the latency.
 
-**6. The mesh still behaves.** Run the conformance suites —
-[R15](#r15-prove-the-deployment-is-behaving), and read its note on availability
-first.
+**6. The broker refuses a connection with no credential.** This is the check for
+the failure that looks like nothing: a broker accidentally running without
+authentication accepts everyone, and every other step on this list still passes.
+
+```bash
+nats --server nats://<MESH_HOST>:4222 pub sanity.check hello
+# or, with no nats CLI on the host, from the bundle's own network:
+docker run --rm --network agentmesh_default natsio/nats-box:0.14.5 \
+  nats -s nats://nats:4222 pub sanity.check hello
+```
+
+Expect a prompt refusal that names authorization, of the shape
+`nats: error: … Authorization Violation`. The one outcome you must not accept is
+the message being published. If it publishes, the broker is not enforcing
+authentication, every credential you minted is decoration, and nothing else on
+this list means anything until the broker config is fixed.
+
+**7. A guest credential is denied the subjects that matter.** Skip this if you
+skipped step 3. Save the credential `/v1/guest` returned to a file, then probe a
+privileged subject with it, subscribe and publish separately:
+
+```bash
+nats --server nats://<MESH_HOST>:4222 --creds ./guest.creds \
+  sub '$KV.mesh_operator_sessions.>'     # watch it a few seconds, then ctrl-c
+nats --server nats://<MESH_HOST>:4222 --creds ./guest.creds \
+  pub 'mesh.peer.x.probe' hello
+```
+
+Read this before trusting what you see: a NATS permission denial does not throw
+and does not close the connection. It arrives afterwards, as an async status
+event of the shape `Permissions Violation for Subscription to …`, and on some
+servers it is easy to miss entirely ([trap 2](#51-the-traps-first)). So "no error
+appeared" does not mean the operation was allowed, and it does not mean it was
+denied either; it means you have not looked yet. The pass condition is seeing the
+explicit violation line for **both** probes, because publish and subscribe are
+separate grants and one can be open while the other is closed. The fail condition
+is data: if the subscribe starts printing keys, the guest credential can read
+operator session tokens. On a pool minted by the Compose bootstrap this step
+fails, and that is the point of running it; see the warning in
+[section 2.2](#22-bring-up-a-mesh-with-compose) for why, and what must change
+before the instance is exposed to anyone.
+
+**8. The mesh still behaves.** Run the conformance suites —
+[R15](#r15-prove-the-deployment-is-behaving), and read its warning about the
+endpoint defaults first.
 
 ---
 
@@ -1182,12 +1254,12 @@ path silently creates a nested object and changes nothing at all.
 ### R15. Prove the deployment is behaving
 
 The conformance suite is not part of this deployment bundle. It lives with the
-protocol, and where it is published is not something this handbook can verify —
-see [section 8](#8-where-this-handbook-is-uncertain). If you have it, this is how
-it runs:
+protocol, publicly, at https://github.com/jeffrschneider/agentmesh-protocol,
+under `conformance/core` and `conformance/peering`. This is how it runs:
 
 ```bash
-cd conformance/peering
+git clone https://github.com/jeffrschneider/agentmesh-protocol
+cd agentmesh-protocol/conformance/peering
 npm install                    # required even to run the CORE suite
 
 export MESH_WS_URL=<MESH_WS>
@@ -1199,6 +1271,15 @@ export REGISTRAR=<REGISTRAR>
 node run.mjs                   # the peering board
 cd ../core && node run.mjs     # the core board
 ```
+
+**Every one of those exports has a default, and the defaults point at the
+reference instance** (`wss://mesh.agentmesh.ai` and its API), because that is
+what the suite develops against. Forget one export and the run does not fail: it
+tests someone else's mesh instead of yours, comes back green, and tells you
+nothing. The symptom is a board that stays green while your own deployment is
+down. Newer runners print a banner at startup naming the endpoints under test;
+read it before you read any result, and if it names a host that is not yours,
+stop and fix your exports rather than trusting the board.
 
 For automation, and only for automation:
 
@@ -1818,11 +1899,24 @@ systemd unit with no `ExecReload`. If you write your own unit, you decide this.
 nothing here can tell you how a registrar you build should be configured. With
 `DATABASE_URL` unset it starts an embedded Postgres, which is a rig-only path.
 
-**Manual guest-pool minting is not scripted.** The Compose bootstrap's guest loop
-shows the shape but not the permission set the rotation job installs, and the
-permission set is the whole safety property.
-[R13](#r13-re-mint-the-guest-pool-when-rotation-is-refusing) explains what to do
-instead.
+**Manual guest-pool minting is not scripted, and the pool the Compose bootstrap
+mints is wide open.** The bootstrap's guest loop shows the shape but not the
+permission set, and the permission set is the whole safety property. What the
+bootstrap actually installs is not merely unspecified: `nsc add user` with no
+permissions block mints a user that inherits the account's
+`default_permissions`, the bootstrap sets none of those, and the result is a
+guest credential that can publish and subscribe almost anywhere in the account,
+including the KV bucket holding operator session bearer tokens as plaintext keys.
+"It connected fine" is not evidence to the contrary: connecting proves
+authentication, never authorization, and a denial would arrive as an async
+status event rather than an error ([trap 2](#51-the-traps-first)). Rotation then
+copies the deployed permissions forward rather than inventing new ones, so the
+open grant renews itself on schedule. The full statement of what this means for
+an exposed instance, and what to do before exposing one, is in
+[section 2.2](#22-bring-up-a-mesh-with-compose); the least-privilege template
+that closes it is being prepared and will be published separately.
+[R13](#r13-re-mint-the-guest-pool-when-rotation-is-refusing) explains why fixing
+the rotation job, not hand-minting, is the right lever.
 
 **The adapter install step on a host running several agents is not scripted
 here.** Nothing in this bundle installs or pins an adapter version on a node.
@@ -1836,10 +1930,14 @@ the CLI exposes.
 in R13 need a context or explicit credentials, and no file here sets one up.
 Confirm the bucket's contents before deleting from it.
 
-**Where the conformance suite is published.** It is not in this repository, and
-this handbook cannot verify what is available where.
-[SECURITY.md](../SECURITY.md) points at a separate protocol repository for
-specification and conformance reports, which is the place to look.
+**Nothing schedules a conformance run.** The suite itself is public at
+https://github.com/jeffrschneider/agentmesh-protocol
+([R15](#r15-prove-the-deployment-is-behaving)), but neither bundle here runs it
+on any schedule, and a run is only as true as its environment: the suite's
+endpoint defaults point at the reference instance, so a scheduled run that loses
+its exports tests someone else's mesh and stays green. If you schedule it, pass
+`--ci`, pin the exports where the scheduler cannot lose them, and record the
+timestamp of the last honest run.
 
 **TLS, ingress and certificates are entirely yours.** Neither bundle ships an
 ingress object, a certificate issuer, or a reverse-proxy config, and no runbook
