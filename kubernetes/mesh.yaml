@@ -40,6 +40,52 @@ data:
     port: 4222
     http: 8222
 
+    # Set explicitly, not inherited. Two reasons. It is a contract: the API
+    # advertises exactly this figure to clients as `max_message_bytes` and
+    # refuses request bodies larger than it (services/src/api/api-service.ts,
+    # `max_message_bytes: 1024 * 1024` in the plan response and `MAX_BODY_BYTES`
+    # on the request path), so a broker that disagreed would either reject what
+    # the API accepted or accept what the API promised to refuse. And a default
+    # is not a decision: the server's own default happens to be the same 1 MiB
+    # today, and writing it down is what stops a version bump from moving it.
+    max_payload: 1048576
+
+    # The next three settings are the graceful-shutdown half of this config, and
+    # they only make sense read together with the preStop hook and
+    # terminationGracePeriodSeconds on the StatefulSet below.
+    #
+    # The hook runs `nats-server --signal ldm=/var/run/nats/nats.pid`.
+    # That form of the signal reads the pid out of a file, so the file has to
+    # exist: without this line nothing ever writes one, the hook fails, and the
+    # drain silently does not happen. Declared here rather than as `-P` on the
+    # command line because every other server setting is in this file and the
+    # container args carry only the path to it. The directory is an emptyDir
+    # mounted at /var/run/nats; the two paths have to stay in step.
+    pid_file: "/var/run/nats/nats.pid"
+
+    # Three numbers that have to agree with terminationGracePeriodSeconds: 75
+    # on the pod. The arithmetic:
+    #
+    #   lame_duck_grace_period  10s  after entering lame duck the server stops
+    #                                accepting and leaves existing connections
+    #                                alone this long, so clients see the notice
+    #                                and reconnect elsewhere on their own
+    #   lame_duck_duration      45s  TOTAL time in lame duck, grace period
+    #                                INCLUDED. The server spreads connection
+    #                                closes over duration minus grace, so 35s
+    #                                of eviction follows the 10s hold
+    #   grace period            75s  45s of drain, then 30s of margin for the
+    #                                preStop dispatch and the shutdown that
+    #                                follows the last close
+    #
+    # The shipped default is 2m, which does not fit in 75s at all: the kubelet
+    # would SIGKILL the pod partway through the drain, which is the outage the
+    # drain exists to prevent. Bounds on these two: nats-server enforces a
+    # 30 second floor on lame_duck_duration, and refuses to start if the grace
+    # period is not strictly lower than the duration.
+    lame_duck_duration: "45s"
+    lame_duck_grace_period: "10s"
+
     jetstream {
       store_dir: "/data/jetstream"
       max_mem: 1G
@@ -133,7 +179,9 @@ spec:
           whenUnsatisfiable: DoNotSchedule
           labelSelector:
             matchLabels: { app: nats }
-      # Long enough for lame duck below to finish handing clients off.
+      # 45s of lame duck drain plus 30s of margin. This number and the two
+      # lame_duck_* settings in the ConfigMap are one decision in two places:
+      # raising the drain without raising this gets the pod killed mid-handoff.
       terminationGracePeriodSeconds: 75
       containers:
         - name: nats
@@ -153,6 +201,13 @@ spec:
               # Lame duck: stop accepting, tell connected clients to reconnect
               # elsewhere, then exit. Without this a rolling restart looks like
               # an outage to every agent.
+              #
+              # The hook returns as soon as the signal is delivered, and the
+              # kubelet then sends SIGTERM to a server that is still draining.
+              # That is survivable on purpose: nats-server ignores SIGTERM once
+              # lame duck mode is already in progress, so the drain runs to
+              # completion on the lame_duck_* schedule in the ConfigMap and the
+              # only real deadline is terminationGracePeriodSeconds above.
               exec:
                 command: ["nats-server", "--signal", "ldm=/var/run/nats/nats.pid"]
           volumeMounts:
@@ -209,6 +264,27 @@ metadata:
   name: services
   namespace: agentmesh
 spec:
+  # Recreate, not the default RollingUpdate, for two independent reasons.
+  #
+  # Mechanical: the state volume is a ReadWriteOnce PVC, and a rolling update
+  # brings the replacement pod up before the old one is gone. ReadWriteOnce is
+  # per NODE, so which way this breaks depends on where the replacement lands.
+  # On another node it cannot attach the volume at all: it stays Pending with a
+  # FailedAttachVolume / Multi-Attach event, the old pod keeps serving, and the
+  # rollout never completes without someone deleting the old pod by hand.
+  #
+  # Correctness: on the SAME node it does attach, starts, and that is the worse
+  # outcome, because two instances of this tier are wrong. No subscription here
+  # uses a NATS queue group, so both would answer every request, and both would
+  # be writing the same usage counters and the same console login hash. See the
+  # replica note directly below. Recreate is what makes "exactly one" true
+  # DURING a deploy and not only after it.
+  #
+  # The price is a few seconds with no API while the new pod starts. That is the
+  # honest shape of a tier that cannot run two of itself, and a predictable gap
+  # is better than either a stall or a brief double.
+  strategy:
+    type: Recreate
   # NOT safe to raise, and this is not a throughput note. No subscription in the
   # services tier uses a NATS queue group, so NATS delivers every message to
   # every subscriber: two replicas would both do the work and both reply to a

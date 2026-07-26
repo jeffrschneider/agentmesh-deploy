@@ -820,9 +820,11 @@ autoscaler near the StatefulSet.
 
 On a clustered broker there is a way to avoid dropping every connection, called
 lame duck mode: the server stops accepting, hands its existing clients off to its
-peers, and only then exits. It is a planning matter because it only works when
-there is a peer to hand off to, and because the manifest's attempt at it in this
-repository has a gap you have to close yourself. Both are in
+peers, and only then exits. The Kubernetes manifest here wires it up, and the
+mechanism has been verified against a real server binary, though not yet through a
+rolling restart on a cluster. It stays a planning matter because it only works when
+there is a peer to hand off to, and because five settings have to agree with each
+other before a drain fits inside the pod's grace period. Both are in
 [planning-and-sizing.md §5](planning-and-sizing.md#5-rolling-upgrades).
 
 ### R5. Deploy services, agents, bridge and console
@@ -847,12 +849,12 @@ The two images are released together under one version, deliberately: they are
 deployed together and talk to each other, so independent version numbers would
 only create pairs nobody has tested. Change both.
 
-There is a gap in the services' HTTP surface while the swap happens, and it cannot
-be closed by briefly running two instances, because two would answer every request
-twice. On Kubernetes the default rolling update tries to do exactly that and can
-stall against the state volume instead;
+There is a gap of a few seconds in the services' HTTP surface while the swap
+happens, and it cannot be closed by briefly running two instances, because two
+would answer every request twice. On Kubernetes that is why the services Deployment
+sets `strategy: Recreate` instead of taking the default rolling update;
 [planning-and-sizing.md §5.3](planning-and-sizing.md#53-upgrading-the-services-and-the-console)
-explains the mechanism and what to set.
+explains both ways the default goes wrong.
 
 Deploying the services **from source** onto a VM — staging trees, building the
 console locally, copying, restarting — is deployment-specific and no script for it

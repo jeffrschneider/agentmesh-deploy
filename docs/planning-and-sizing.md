@@ -345,14 +345,14 @@ separately ([section 6](#6-verifying-the-install-works)).
 ## 3. Sizing, and what binds first
 
 Five numbers decide how large a mesh can get before something refuses. They all
-exist and they are all verifiable, but they live in five different files, which is
-the reason for collecting them here. One of them additionally has to be mirrored
+exist and they are all verifiable, but no two of them are set in the same place,
+which is the reason for collecting them here. One of them additionally has to be mirrored
 into a second file by hand, and those two copies have drifted apart in a real
 deployment before, invisibly, until someone did the arithmetic.
 
 | Bound | Value as shipped | Where it is set |
 |---|---|---|
-| Per-envelope size on the wire | 1 MiB | `max_payload` in the broker config. **Not set by either bundle in this repository**, so both inherit the NATS server default, which is also 1 MiB. |
+| Per-envelope size on the wire | 1 MiB, written as `1048576` | `max_payload`, set explicitly in both bundles: in the Kubernetes ConfigMap, and in the config `compose/bootstrap.sh` writes. The server's own default is the same figure, so the line pins the number rather than changing it. |
 | Inbound sender text, per agent | 64 KiB of characters | A hardcoded constant in the TypeScript SDK. Not an environment variable. Per-agent override only. |
 | Offline mailbox retention | 7 days, or 25 MiB per agent, whichever comes first | `INBOX_BUFFER_MAX_AGE_MS` and `INBOX_BUFFER_MAX_BYTES` in the services environment. |
 | Offline mailbox count | 500 mailboxes | `INBOX_BUFFER_MAX_MAILBOXES` in the services environment. |
@@ -369,15 +369,26 @@ larger than that is supposed to become an artifact: the bytes go to the object
 store and the envelope carries a `ref`
 ([SPEC §18.9](https://dev.agentmesh.ai/spec.html)).
 
-Worth knowing, because it affects whether you can rely on it: **neither bundle in
-this repository sets `max_payload` at all.** The Compose bootstrap writes a
-`nats.conf` with `server_name`, a `jetstream` block, a `websocket` block and an
-include, and the Kubernetes ConfigMap writes the same plus `port`, `http` and a
-`cluster` block. Neither mentions payload size. The effective value is 1 MiB
-because that is the NATS default, which means the behaviour is right and the
-provenance is not: a vendor default is not a decision, and it moves if the vendor
-moves it. If the number matters to your design, set it explicitly in your own
-broker config rather than inheriting it.
+Both bundles here now write `max_payload: 1048576` explicitly, the Kubernetes
+ConfigMap and the config `compose/bootstrap.sh` generates. **Read that as a pin,
+not as a fix.** The NATS server's own default is also exactly 1048576, so on every
+current version the line changes no behaviour whatsoever; nothing was broken before
+it and nothing works differently after it. What it buys is provenance. A default is
+not a decision: it is a number someone else chose, it can move in a future release,
+and the API gateway has already promised clients a specific figure. Writing it down
+is what stops a version bump from quietly putting the broker and the API's
+advertised `max_message_bytes` at odds, where the broker would either reject what
+the API accepted or accept what the API promised to refuse.
+
+One consequence of *how* the Compose value arrives, worth knowing before you assume
+you have it: `bootstrap.sh` is idempotent and exits without touching anything when
+`nats.conf` already exists. So an existing Compose deployment does not pick this up
+by pulling a newer bundle. Only a fresh volume generates a config containing it,
+and starting over on that volume means new operator keys and therefore new
+credentials for every agent. If you want the line on a deployment that is already
+running, add it to that host's `nats.conf` by hand and restart the broker
+([R4](operator-handbook.md#r4-restart-the-broker)). Since the value equals the
+current default, there is no hurry.
 
 **64 KiB is something else, and it is not a mesh limit.** The TypeScript SDK caps
 the sender-supplied text it will hand to an agent's handler at 64 KiB, and refuses
@@ -646,47 +657,85 @@ planning rather than in a runbook.
 ### 5.1 Lame duck mode, which is the primitive for upgrading a cluster
 
 A NATS server can be told to retire gracefully instead of stopping. The sequence,
-per the NATS documentation at
+documented at
 <https://docs.nats.io/running-a-nats-service/nats_admin/lame_duck_mode>, is that
-the server stops accepting new connections, waits out a grace period, and then
-closes its existing client connections gradually over a configurable duration
-before shutting down. Clients whose libraries support it also receive a
+the server stops accepting new connections, holds its existing ones untouched for
+a grace period, and then closes them gradually across the rest of a configurable
+window before shutting down. Clients whose libraries support it also receive a
 notification that the server is entering lame duck mode, which lets an
 application prepare for the brief gap between being evicted and reconnecting
 somewhere else. The point of the gradual eviction is that a thousand clients do
 not all reconnect in the same millisecond.
 
-The pieces, all verifiable in the NATS documentation:
+The pieces. The first and last are in the NATS documentation; the two in the middle
+are stated the way the server actually implements them, because the documentation
+is easy to read the other way round and we read it the other way round once.
 
 - The signal is `nats-server --signal ldm`, which corresponds to `SIGUSR2`. Where
   more than one server runs on the host, the signal takes a target in the form
   `ldm=<pid>` or `ldm=/path/to/pidfile`.
-- `lame_duck_grace_period` is how long the server waits after entering lame duck
-  before it starts closing connections. It defaults to `10s`.
-- `lame_duck_duration` is the period over which connections are then closed, after
-  which the server exits. It defaults to `2m` and cannot be set below 30 seconds.
+- `lame_duck_grace_period` is a hold. After entering lame duck the server stops
+  accepting, then leaves its existing connections completely alone for this long,
+  so that clients see the notice and have a chance to move on their own before
+  anything is closed under them. It defaults to `10s`.
+- `lame_duck_duration` is the **total** time spent in lame duck, with the grace
+  period **included**, not the period of closing that follows it. The server
+  subtracts one from the other and spreads the connection closes over what is
+  left, so the actual eviction window is duration minus grace. It defaults to `2m`
+  and has a floor of 30 seconds. So `45s` with a `10s` grace is 10 seconds of hold
+  and 35 seconds of eviction, not 55 seconds in total. Getting this backwards makes
+  every drain you plan shorter than you think it is.
+- **The grace period must be strictly lower than the duration, and the config test
+  will not tell you if it is not.** The floor on the duration is checked when the
+  config is parsed, but the comparison between the two is a startup check, so
+  `nats-server -t` validates a config that the server will then refuse to boot on.
+  Of the three numbers in this section that is the one most likely to bite someone
+  editing them, because the feedback arrives at the worst moment: on the next
+  restart, from a server that will not come up.
 - The pidfile form of the signal needs a pidfile to exist. `pid_file` in the
   server configuration, or `-P` / `--pid` on the command line, is what writes one.
 
 Lame duck is only useful when there is somewhere for the clients to go. On a
 single node there is no surviving server to hand them to, so signalling it makes
 the outage orderly and slightly longer rather than avoiding it. Its value is
-entirely in the clustered shape.
+entirely in the clustered shape, which is why the Compose bundle does not configure
+any of it and the Kubernetes bundle does. That asymmetry is deliberate rather than
+an oversight.
 
-**One thing to check before you rely on it here.** The Kubernetes manifest already
-attempts this: the NATS container has a `preStop` hook that runs
-`nats-server --signal ldm=/var/run/nats/nats.pid`, an `emptyDir` mounted at
-`/var/run/nats` for the pidfile to live in, and `terminationGracePeriodSeconds:
-75` to leave room for the handoff. Two gaps are visible in the same file. The
-`nats.conf` in the ConfigMap sets no `pid_file`, and the container's arguments
-pass no `-P`, so nothing ever writes the pidfile the hook names. And the default
-`lame_duck_duration` of two minutes does not fit inside a 75 second grace period,
-so even with the signal delivered Kubernetes would terminate the pod partway
-through the handoff. Closing both means writing the pidfile and setting a
-`lame_duck_duration` that fits the grace period you allow. Neither change has been
-made or tested in this repository, so treat the hook as intent rather than as a
-working feature, and verify it yourself on your own cluster before an upgrade
-depends on it.
+**How the Kubernetes manifest wires it, and how far it has been tested.** Five
+settings in [`kubernetes/mesh.yaml`](../kubernetes/mesh.yaml) have to agree with
+each other, and reading any one of them alone will mislead you:
+
+| Setting | Value | Why that value |
+|---|---|---|
+| `preStop` hook | `nats-server --signal ldm=/var/run/nats/nats.pid` | Puts the server into lame duck before the kubelet stops it. |
+| `pid_file` | `/var/run/nats/nats.pid` | The pidfile form of the signal reads the pid out of a file, so the file has to exist. Declared in the config rather than as `-P` because the container args carry only the path to the config. It lands in an `emptyDir` mounted at the matching path, and the two have to stay in step. |
+| `lame_duck_duration` | `45s` | Total time in lame duck. With the 10s grace inside it, 35 seconds of eviction. |
+| `lame_duck_grace_period` | `10s` | The hold before anything is closed. Strictly lower than the duration, as the server requires. |
+| `terminationGracePeriodSeconds` | `75` | 45 seconds of drain plus 30 seconds of margin for the hook dispatch and the shutdown after the last connection closes. |
+
+The last row is the arithmetic worth carrying if you change any of it: the drain has
+to finish inside the pod's grace period, or the kubelet sends SIGKILL partway
+through and you get the outage the drain existed to prevent. The shipped NATS
+default of `2m` does not fit in 75 seconds at all, which is why the duration is set
+rather than inherited.
+
+One mechanism that looks alarming and is not. The `preStop` hook returns as soon as
+the signal is delivered, so the kubelet then sends SIGTERM to a server that is
+still draining. That is survivable by design: once lame duck is already in
+progress, `nats-server` ignores SIGTERM, so the drain runs to completion on its own
+schedule and the only real deadline is the pod's grace period.
+
+**What has actually been proven, and what has not.** The mechanism was run against
+a real `nats-server` binary on Linux rather than reasoned about from the manifest:
+the signal was delivered through the pidfile, a following SIGTERM did not abort the
+drain, connections closed at exactly the grace boundary rather than immediately,
+and the process exited about a second after the last one. So the settings do what
+this section says they do. **It has not been run on a cluster.** Nobody here has
+watched three pods roll with real agents connected and confirmed that clients land
+on surviving peers without an error surfacing to an application. Treat the
+mechanism as verified and the cluster-level outcome as untested, and watch your own
+first rolling restart rather than assuming it.
 
 ### 5.2 The hard restart, which is what the single-node shapes do
 
@@ -728,17 +777,34 @@ today**, and it follows directly from
 one replica means the swap is a gap, and you cannot close the gap by briefly
 running two, because two would both answer every request.
 
-On Kubernetes there is a specific interaction to plan for rather than discover.
-The services Deployment declares no update strategy, so it takes the default
-rolling update, which for a single replica permits one surplus pod. The new pod is
-therefore created while the old one is still running, and the services state
-volume is a `ReadWriteOnce` PersistentVolumeClaim, which only one node may mount
-at a time. If the new pod schedules onto a different node, it cannot attach the
-volume and the rollout stalls with the old pod still serving. Setting that
-Deployment's strategy to `Recreate` trades the stall for a short, predictable gap,
-which is the honest shape of the thing anyway given the replica limit. This
-follows from reading the manifest rather than from a run that hit it, so verify it
-on your own cluster.
+On Kubernetes the services Deployment therefore sets `strategy: type: Recreate`
+rather than taking the default. That is worth understanding rather than copying,
+because the default is wrong here in two different ways depending on scheduling, and
+one of them is not the one people expect.
+
+A rolling update brings the replacement pod up before the old one is gone, and the
+services state volume is a `ReadWriteOnce` PersistentVolumeClaim. The thing to be
+clear about is that **ReadWriteOnce is scoped per node, not per pod**, so which
+failure you get depends on where the replacement lands:
+
+- **On a different node**, it cannot attach the volume at all. The pod stays
+  Pending with a `FailedAttachVolume` or Multi-Attach event, the old pod keeps
+  serving, and the rollout never completes until someone deletes the old pod by
+  hand. Visibly stuck, which at least tells you something is wrong.
+- **On the same node**, it attaches, starts, and serves. That is the worse
+  outcome, because for those seconds two instances of a tier that cannot safely
+  run two are both live: both answer every request, since nothing here uses a
+  queue group, and both write the same usage counters and the same console login
+  hash
+  ([section 4.3](#43-the-second-limit-the-services-tier-cannot-go-past-one-replica)).
+  Nothing looks broken. You get duplicated work and duplicated replies, quietly,
+  during what reads as a normal deploy.
+
+`Recreate` removes both branches by stopping the old pod before starting the new
+one, which is what makes "exactly one instance" true *during* a deploy and not only
+between deploys. The price is a few seconds with no API. That is the honest shape of
+a tier that cannot run two of itself, and a predictable gap is better than either a
+stall or a silent double.
 
 If you are upgrading everything, the order that minimises noise is brokers first,
 one at a time with lame duck if you are clustered, then the services and console

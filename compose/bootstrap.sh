@@ -62,6 +62,14 @@ cat > "$DATA/nats.conf" <<EOF
 # delete the volume to regenerate, which also invalidates every credential.
 server_name: $NAME
 
+# Set explicitly, not inherited. It is a contract: the API advertises exactly
+# this figure to clients as max_message_bytes and refuses request bodies larger
+# than it, so a broker that disagreed would either reject what the API accepted
+# or accept what the API promised to refuse. And a default is not a decision:
+# the server's own default happens to be the same 1 MiB today, and writing it
+# down is what stops a version bump from moving it.
+max_payload: 1048576
+
 jetstream {
   store_dir: "/jetstream"
   max_mem: 1G
