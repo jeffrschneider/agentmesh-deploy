@@ -22,6 +22,17 @@ or in a cloud service's configuration, or nowhere at all, it says so in the text
 [Section 8](#8-where-this-handbook-is-uncertain) lists every uncertainty in one
 place.
 
+**If nothing is running yet, this is the wrong document.** The decisions you make
+before you install, the infrastructure shapes and what they cost, how large a mesh
+gets before something binds, and what high availability does and does not buy you
+today, are in its companion:
+[`planning-and-sizing.md`](planning-and-sizing.md) /
+<https://github.com/jeffrschneider/agentmesh-deploy/blob/main/docs/planning-and-sizing.md>.
+That one is read once, before anything exists. This one is read repeatedly, with a
+mesh already up. They deliberately do not repeat each other, so where a decision
+has a procedure the planning document names the runbook here, and where this
+handbook reaches a planning question it points there.
+
 A note on sources. The services and console are published as container images
 from a private source repository, so where this handbook attributes a behaviour to
 a specific module it does so as attribution, not as a pointer you can open. The
@@ -34,7 +45,7 @@ this repository or at https://dev.agentmesh.ai.
 
 - [Placeholders](#placeholders) — fill these in once; nothing below assumes a host but yours
 - [1. The shape of a deployment](#1-the-shape-of-a-deployment) — the pieces, which are optional, the ports, where things live
-- [Decisions to make before you start](#decisions-to-make-before-you-start) — the real forks, what each one costs to change later
+- [Before you start: planning, sizing and availability](#before-you-start-planning-sizing-and-availability) — moved to [`planning-and-sizing.md`](planning-and-sizing.md); this is the pointer
 - [2. Day one](#2-day-one) — what must exist first, three ways to bring a mesh up, how to know it worked
 - [3. What you owe it](#3-what-you-owe-it) — the standing obligations, and where scheduled work actually runs
 - [4. Runbooks](#4-runbooks) — the seventeen procedures, each with a "worked when"
@@ -88,7 +99,7 @@ Fill these in once. Nothing below assumes any host but yours.
 | `<CLOUD_PROJECT>` | your cloud provider's project or account id, where you use one | |
 | `<SECRET_STORE>` | your secret manager, if you use one, and the command that reads from it | |
 | `<MAIL_API_KEY_FILE>` | the file holding your mail provider's API key | `<CREDS_DIR>/resend.key` |
-| `<KEYSTORE_BACKUP>` | wherever the operator keystore backup lives. See the last decision below | |
+| `<KEYSTORE_BACKUP>` | wherever the operator keystore backup lives. This is the one choice with no undo: [planning-and-sizing.md §1.3](planning-and-sizing.md#13-the-five-that-deserve-more-than-a-row) | |
 | `<REGISTRAR>` | the registrar you point `PAN_REGISTRAR` at. Defaults to `https://naming.agentmesh.ai` | |
 | `<HANDLE>` | a handle on your mesh | `Coder.you@example.com` |
 | `<OPERATOR_EMAIL>` | the email address of an operator who owns room and agent quota | |
@@ -118,7 +129,11 @@ registry, task manager, catalog, activity, rooms, admission — plus the HTTP AP
 gateway that fronts all of them. It can be split with `--service=<name>`, but
 every shape in this repository runs them together, on port 3001. The API gateway
 is also the operator surface (`/v1/operator/*`) and the only public health
-endpoint. Published as `ghcr.io/jeffrschneider/agentmesh-services`.
+endpoint. Published as `ghcr.io/jeffrschneider/agentmesh-services`. **Run exactly
+one instance of it.** No subscription in the services tier uses a NATS queue
+group, so a second instance answers every request a second time; the full reason,
+and the two other causes, are in
+[planning-and-sizing.md §4.3](planning-and-sizing.md#43-the-second-limit-the-services-tier-cannot-go-past-one-replica).
 
 **Operator console.** A static build served by a file server, with TLS expected
 in front. It is a browser client: it talks to the API gateway over HTTPS and to
@@ -133,8 +148,9 @@ HTTPS, independently of any mesh, so a self-hosted mesh keeps using the public
 registrar at https://naming.agentmesh.ai unless you set `PAN_REGISTRAR`. **No
 registrar container image is published today**, and there is no registrar
 workflow in the release pipeline, so "run your own registrar" is not a path this
-bundle can give you. See the naming decision below and
-[R8](#r8-deploy-the-registrar).
+bundle can give you. See the naming decision in
+[planning-and-sizing.md §1.2](planning-and-sizing.md#12-the-decisions-in-one-table)
+and [R8](#r8-deploy-the-registrar).
 
 **Nodes / the adapter.** `mesh-adapter` is the thin reference node: one file that
 gives a local CLI agent a mesh inbox, a durable identity, and optionally a handle.
@@ -170,9 +186,13 @@ Also not published as an image; optional either way.
 | Bridge (A2A) | Optional | No A2A interop. |
 | Postgres (history) | Optional | `METRICS_DB_URL` unset means no charts; the mesh is unaffected. |
 | Object storage (rooms drive) | Optional | `ROOMS_DRIVE_BACKEND` defaults to `nats`, which keeps artifacts in JetStream and needs nothing else. |
-| Mail | Conditional, and **not portable today** | Without it there are no sign-in links, so no user accounts. See the mail decision below and [5.5](#55-mail-is-not-arriving). Newer builds of the services *refuse to start* under `NODE_ENV=production` with no mail key; the published `0.2.0` image does not. |
+| Mail | Conditional, and **not portable today** | Without it there are no sign-in links, so no user accounts. See the mail decision in [planning-and-sizing.md §1.3](planning-and-sizing.md#13-the-five-that-deserve-more-than-a-row) and [5.5](#55-mail-is-not-arriving). Newer builds of the services *refuse to start* under `NODE_ENV=production` with no mail key; the published `0.2.0` image does not. |
 
 ### 1.3 The three shapes
+
+Which one to choose, and what each costs in availability and in disk, is
+[planning-and-sizing.md §2](planning-and-sizing.md#2-infrastructure-shapes). What
+follows is what each shape *is*, so that the runbooks below make sense.
 
 **Docker Compose.** [`compose/`](../compose/) in this repository — four containers
 (`bootstrap`, `nats`, `services`, `console`) and three named volumes. `bootstrap`
@@ -219,7 +239,8 @@ volumes (Compose names them; Kubernetes uses PVCs and Secrets for the same split
 
 ```
 mesh-data        the nsc keystore under .nsc, account JWTs, creds/, nats.conf
-                 ↳ THIS is the mesh's identity. Back it up. See the last decision below.
+                 ↳ THIS is the mesh's identity. Back it up. The choice of where has
+                   no undo: planning-and-sizing.md §1.3.
 mesh-jetstream   streams and KV: the registry, tasks, rooms
 mesh-usage       per-agent usage counters (SQLite) and the console login hash
 ```
@@ -250,103 +271,25 @@ root. pm2 in particular is per-user, and mixing the two is
 
 ---
 
-## Decisions to make before you start
+## Before you start: planning, sizing and availability
 
-Nine of these change what you build; a few change what you can *undo*. The last
-one has no undo at all.
+Everything you decide *before* anything exists has moved to its own document, so
+that this handbook stays the thing you read with a mesh already running:
+[`planning-and-sizing.md`](planning-and-sizing.md) /
+<https://github.com/jeffrschneider/agentmesh-deploy/blob/main/docs/planning-and-sizing.md>.
 
-| Decision | What it decides | Cost to change later |
-|---|---|---|
-| **Deployment shape** — Compose, Kubernetes, or a VM with a process manager | Where the pieces run, how you restart them, how secrets arrive | Moderate. The mesh's identity is portable: the keystore and the account JWTs move between shapes, so agents keep working. You rewrite your own runbooks, not the mesh. |
-| **A real domain with TLS** | Whether anyone outside your network can use it at all. Not optional — see below | Low to do, but everything downstream embeds it: sign-in links, the console's WebSocket URL, CORS. Changing the domain later means reissuing links and re-pointing clients. |
-| **User accounts, and therefore mail** | Whether humans sign in, own agents, and hold quota — or whether the mesh is sandbox-only | High, and today it is a code change rather than a configuration one. See below. |
-| **Artifact storage** — `nats`, `fs`, or `gcs` | Where room artifact bytes physically live | Low for new artifacts, but there is no migration: bytes already written to one backend are not visible through another. Switch early or accept a cut-over. |
-| **Names** — run a registrar, point at one, or skip handles | Whether agents are addressable by `name.you@example.com` or only by raw key | Low. `PAN_REGISTRAR` is one variable. But a handle already bound to a key and pinned by other nodes cannot be re-homed casually — see [R17](#r17-confirm-a-refused-handle-rebinding). |
-| **A public guest sandbox** | Whether strangers can `POST /v1/guest` and get a throwaway credential | Low: an empty pool directory turns it off, and the endpoint answers 503 rather than breaking. But arming it means owning the pool's expiry and rotation forever ([R13](#r13-re-mint-the-guest-pool-when-rotation-is-refusing)). |
-| **Postgres** | The registrar requires it. The history recorder wants it and works without it | Low for the recorder: set `METRICS_DB_URL` any time and charts start recording from then on. There is no backfill. |
-| **Is the console internet-facing** | Whether you need TLS and a public hostname for it, or only an SSH tunnel | Low. Loopback is exempt from the TLS refusal, so `ssh -L 3000:localhost:3000 <host>` is a complete answer and needs no certificate. |
-| **Where the operator keystore backup lives** | Whether the mesh survives losing its host | **No undo.** See below. |
-| **The account resolver** — memory, or directory/URL | Whether adding an account or revoking a credential needs a broker restart | High. Both bundles here use a memory resolver: accounts are literal JWT text in the config file. Moving to a directory resolver later is a broker reconfiguration and a restart, and it is the only way to satisfy the spec's requirement that revocation not restart the mesh ([SPEC §4.8](https://dev.agentmesh.ai/spec.html)). |
-| **Pinned service identities** — the `*_SEED` files | Whether a client can hard-check that a reply claiming to be from the registry actually is | Low to add, mildly disruptive to change. Without them each service generates a fresh keypair on **every restart** and clients can only pin-and-warn. Adding one later is fine; rotating one makes every client that pinned the old key log a mismatch. Install them on day one. |
-| **Replica count for the services** | Throughput | Low, with one catch: the activity service keeps usage counters in a local SQLite file, so two replicas keep two divergent sets of counters, and the console login hash lives in the same place. Everything else is shared through JetStream. |
-| **Which image version you pin** | What you are running after an unattended restart | Low, and this is the point of pinning. `0.2.0` is the only published version at the time of writing. |
+It carries the fourteen decisions and what each one costs to undo, the expanded
+notes on TLS, on mail, on artifact storage, on keystore custody and on what a host
+actually has to provide, the three infrastructure shapes and their tradeoffs, the
+sizing arithmetic and which limit binds first, an honest account of what clustering
+does and does not buy you today, and rolling upgrades.
 
-Four of these deserve more than a table row.
-
-**TLS is not optional, and the reason is mechanical.** The operator console is a
-browser page that opens a WebSocket straight to the broker. An `https:` page is
-not permitted to open a plain `ws://` connection, so the moment the console is
-served over TLS the broker's WebSocket must be `wss://` too — you cannot do one
-half. Independently, the console refuses to load over plain HTTP anywhere but
-loopback, because it holds an operator session in `sessionStorage` and that
-session can disable accounts, release handles and reach a fleet host. The console
-image accepts `ALLOW_INSECURE_HTTP=1` to override that refusal and then carries a
-standing warning; treat it as a thing you set on a network you fully control and
-nowhere else. And sign-in links are built from `API_BASE_URL`, so a mesh with user
-accounts and no domain mails out links nobody can use. Both bundles here ship
-without TLS deliberately, and both READMEs say so; terminating it is the first
-thing you add.
-
-**User accounts drag in mail, and mail is where this bundle is least portable.**
-The services' email module defines an `EmailService` interface with exactly three
-methods — `sendMagicLink`, `sendInvitation`, `sendAgentKey` — and ships exactly
-two implementations: a **Resend** adapter that posts to `https://api.resend.com/emails`,
-and a console fallback that prints to the log and is a development tool (it prints
-nothing at all unless `MESH_DEV_MODE=1`, because a sign-in link on stdout is a
-credential). There is no provider abstraction beyond that interface. Two
-consequences to be honest about:
-
-- Another provider means implementing those three methods and rebuilding the
-  image. Nothing selects a provider at runtime; `RESEND_API_KEY` present or
-  absent is the entire decision.
-- **Set the sending address.** `MESH_MAIL_FROM` is the address mail comes from.
-  A provider will not send from a domain the account has not verified, so leaving
-  this at its default — the AgentMesh deployment's own address — gets your sends
-  rejected rather than delivered. A bare address is wrapped with `MESH_NAME`
-  (`noreply@example.com` becomes `Example Mesh <noreply@example.com>`), or pass
-  the full display form yourself. Set `MESH_CONSOLE_URL` too: it is the console
-  address embedded in outbound mail and it also defaults to ours.
-
-So the honest reading today: **accounts need a provider Resend's API shape fits,
-and a verified sending domain.** If you do not want either, a sandbox-and-agents
-mesh needs no mail at all. That is a real and complete deployment —
-agents connect with credentials you mint, register, discover each other, run
-tasks, and share rooms, none of which touches email. Deciding you want human
-sign-in is deciding to build the services yourself. Examples below use Resend
-because it is the one adapter that exists; read them as examples, not as a choice
-you are being offered.
-
-**Artifact storage genuinely is portable, and the default needs nothing.**
-`ROOMS_DRIVE_BACKEND` takes three values, and all three are real code paths:
-`nats` (the default) keeps artifact bytes in a JetStream object store, so an
-operator with no cloud at all has a working path and nothing extra to run; `fs`
-writes one file per object under `ROOMS_DRIVE_FS_DIR` (default
-`<INSTALL_ROOT>/rooms-drive`), which suits a host with a persistent disk; `gcs`
-writes to `ROOMS_GCS_BUCKET` and authenticates with ambient application
-credentials. An unrecognised value warns and falls back to `nats` rather than
-failing. Adding S3 or Azure is one class and one branch in that module, but it is
-not there today, so treat "any object store" as false and "these three" as true.
-Members address artifacts by opaque refs and read and write through the rooms
-service, so nothing about the protocol, the SDK or the adapter changes when you
-switch — but the bytes do not follow.
-
-**Where the keystore backup lives is the one decision with no undo.** The
-operator keys minted at bootstrap *are* your mesh's identity. Every account JWT
-and every credential you ever issue chains to them. Lose them and nothing can
-sign a replacement that matches: every credential ever issued becomes permanently
-unusable, and there is no recovery path other than standing up a different mesh
-that happens to have the same name and reissuing every agent. In Compose they are
-in the `mesh-data` volume under `.nsc`; in Kubernetes they are on the workstation
-you minted them on and should never enter the cluster; on a VM they are
-`<CREDS_DIR>/nsc/`. Decide **now** where the backup goes — a secret manager, an
-encrypted archive somewhere else, a printed copy in a safe, anything that is not
-the host itself — and decide who else can reach it, because a backup only one
-person can restore is a single point of failure with a pulse. Then restore it once
-into a scratch directory and confirm it lists your accounts, because a backup that
-has never been restored is a hope ([R11](#r11-restore-the-nsc-keystore)). Two
-things to write down alongside it: never commit the keystore, and never invoke
-`nsc` with only `-H` on a store you care about — it has previously renamed a store
-and left both copies unusable. Pass `--data-dir` and `--keystore-dir` explicitly.
+Two of those decisions are worth naming here rather than only there, because both
+are made at the moment you first run `bootstrap` and neither has a practical undo:
+**custody of the operator keys**, which are the mesh's identity and cannot be
+regenerated by anyone, and **the domain your handles are anchored to**, which other
+people's nodes resolve and then pin. If you read nothing else before installing,
+read those two.
 
 ---
 
@@ -708,9 +651,11 @@ reversal window that is permanent once missed.
 
 The guest pool's free count — to a visitor, "no credentials available" reads as a
 broken product, not a busy one. Durable rooms per operator, refused at the cap.
-JetStream disk against mailbox count, where 500 mailboxes at 25 MB nominal
-exceeds a 10G budget, so **disk binds before the count cap does**. Per-account
-agent caps. Inbox backlog per agent, which is where a wedged attendant shows up
+JetStream disk against mailbox count, where 500 mailboxes at 25 MiB nominal is
+12.2 GiB and exceeds either bundle's disk budget, so **disk binds before the count
+cap does** on every configuration shipped here
+([planning-and-sizing.md §3.3](planning-and-sizing.md#33-the-count-cap-against-the-disk-ceiling-which-is-the-arithmetic-worth-doing)).
+Per-account agent caps. Inbox backlog per agent, which is where a wedged attendant shows up
 first.
 
 ### Things that were true once
@@ -873,6 +818,13 @@ that. And on Kubernetes, JetStream is Raft-replicated, so three replicas means
 quorum is two: restart one pod, wait for it to rejoin, then the next. Never let an
 autoscaler near the StatefulSet.
 
+On a clustered broker there is a way to avoid dropping every connection, called
+lame duck mode: the server stops accepting, hands its existing clients off to its
+peers, and only then exits. It is a planning matter because it only works when
+there is a peer to hand off to, and because the manifest's attempt at it in this
+repository has a gap you have to close yourself. Both are in
+[planning-and-sizing.md §5](planning-and-sizing.md#5-rolling-upgrades).
+
 ### R5. Deploy services, agents, bridge and console
 
 With the published images, a deploy is a tag change.
@@ -894,6 +846,13 @@ loads and signs in.
 The two images are released together under one version, deliberately: they are
 deployed together and talk to each other, so independent version numbers would
 only create pairs nobody has tested. Change both.
+
+There is a gap in the services' HTTP surface while the swap happens, and it cannot
+be closed by briefly running two instances, because two would answer every request
+twice. On Kubernetes the default rolling update tries to do exactly that and can
+stall against the state volume instead;
+[planning-and-sizing.md §5.3](planning-and-sizing.md#53-upgrading-the-services-and-the-console)
+explains the mechanism and what to set.
 
 Deploying the services **from source** onto a VM — staging trees, building the
 console locally, copying, restarting — is deployment-specific and no script for it
@@ -1090,9 +1049,10 @@ These keys **are** the mesh's identity. Lose them and every credential ever issu
 becomes unusable, permanently, because nothing can sign replacements that match.
 There is no recovery path other than reissuing the whole mesh from scratch.
 
-Where the backup lives is your decision (see the last of the
-[decisions](#decisions-to-make-before-you-start)); this runbook assumes you made
-one. The restore is the same regardless of where the archive came from:
+Where the backup lives is your decision, and the one with no undo
+([planning-and-sizing.md §1.3](planning-and-sizing.md#13-the-five-that-deserve-more-than-a-row));
+this runbook assumes you made one. The restore is the same regardless of where the
+archive came from:
 
 ```bash
 # fetch <KEYSTORE_BACKUP> to /tmp/nsc-keystore.tgz by whatever means you chose
@@ -1634,7 +1594,9 @@ on a fresh self-hosted mesh.
 **The creator is not an email-verified operator.** Durable and ACL rooms are
 quota-owned, so the creator's key must reverse-resolve to a verified operator
 handle. Plain operator NATS credentials are not a paired handle. On a mesh with no
-mail — see the decisions — this is a standing limitation rather than a fault.
+mail (see the mail decision in
+[planning-and-sizing.md §1.3](planning-and-sizing.md#13-the-five-that-deserve-more-than-a-row)),
+this is a standing limitation rather than a fault.
 
 **The member was expelled.** Expulsion is checked before the admit list, and it
 takes effect as refusal of renewal: the credential lapses within its 1-hour TTL. A
@@ -1793,7 +1755,9 @@ is broker-enforced, and `sealed` is crypto-enforced, where possession of the key
 ## 7. Limits, and where they are set
 
 Defaults as the code ships them. The env var is the knob; the last column is when
-it is worth turning.
+it is worth turning. These are dials you turn while running. The five numbers you
+size a deployment *against*, before it exists, are collected with their arithmetic
+in [planning-and-sizing.md §3](planning-and-sizing.md#3-sizing-and-what-binds-first).
 
 | Limit | Default | Env var | Worth changing when |
 |---|---|---|---|
@@ -1810,7 +1774,7 @@ it is worth turning.
 | ACL room credential TTL | 1 h | `ROOMS_ACL_CRED_TTL_SEC` | This is also how long an expulsion takes to bite. |
 | Mailbox age | 7 days | `INBOX_BUFFER_MAX_AGE_MS` | |
 | Mailbox size | 25 MB | `INBOX_BUFFER_MAX_BYTES` | |
-| Mailboxes | 500 | `INBOX_BUFFER_MAX_MAILBOXES` | 500 × 25 MB exceeds a 10G disk budget, so **disk binds before the count cap does**. |
+| Mailboxes | 500 | `INBOX_BUFFER_MAX_MAILBOXES` | 500 × 25 MiB is 12.2 GiB, which exceeds both bundles' disk budgets (10G in Compose, 8G per replica in Kubernetes), so **disk binds before the count cap does** on anything shipped here. Raise `max_file` past about 12.25 GiB and that inverts: [planning-and-sizing.md §3.3](planning-and-sizing.md#33-the-count-cap-against-the-disk-ceiling-which-is-the-arithmetic-worth-doing) has the arithmetic. |
 | JetStream disk | the server's `max_file` | `JS_MAX_FILE_BYTES` mirrors it | **Keep the two in step by hand.** If the broker config changes, change the env var, or the obligations screen checks usage against the wrong ceiling. |
 | Sandbox idle TTL | 1 h | `SANDBOX_IDLE_TTL_MS` | Lower it for a public sandbox. An hour lets one abandoned tab hold a credential for an hour. |
 | Sandbox per IP | 3 | `SANDBOX_MAX_PER_IP` | Raise it if developers browse the console while running tests from the same address. |

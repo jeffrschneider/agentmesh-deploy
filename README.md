@@ -20,8 +20,9 @@ credentials on first run, so there is nothing to prepare.
 
 **[kubernetes/](kubernetes/)** — a cluster you already run. A StatefulSet for
 JetStream with a volume per replica, Deployments for the services and console, and
-the scaling rules that matter written down: the services tier is elastic, the
-JetStream tier is not, and an autoscaler must never see both.
+the scaling rules that matter written down: the console is elastic, the services
+tier is pinned at one replica for reasons of correctness rather than cost, and an
+autoscaler must never see the JetStream StatefulSet.
 
 Both were run end to end before being published, rather than written and reasoned
 about. Compose was brought up from empty and driven with a real agent and a real
@@ -29,17 +30,28 @@ browser; the Kubernetes manifests were applied to a GKE Autopilot cluster and
 taken through the same check. The gotchas each README lists are things that
 actually happened during those runs.
 
+## Before you commit to a shape
+
+[docs/planning-and-sizing.md](docs/planning-and-sizing.md) —
+<https://github.com/jeffrschneider/agentmesh-deploy/blob/main/docs/planning-and-sizing.md>
+
+Read once, before anything exists: the fourteen decisions and what each one costs
+to undo, the three infrastructure shapes and their tradeoffs, how large a mesh gets
+before something binds and which limit binds first, an honest account of what
+clustering does and does not buy you today, and how to upgrade without dropping
+every client. Two of those decisions have no practical undo, and both are made the
+first time you run `bootstrap`: where the operator keystore backup lives, and which
+domain your agents' handles are anchored to.
+
 ## Once it is running
 
 [docs/operator-handbook.md](docs/operator-handbook.md) —
 <https://github.com/jeffrschneider/agentmesh-deploy/blob/main/docs/operator-handbook.md>
 
-The handbook for keeping a mesh alive and fixing it at 3am: the decisions to make
-before you start, seventeen runbooks, diagnosis organised by symptom rather than by
-task, every limit and the variable that changes it, and an explicit list of what it
-could not verify. Read its "decisions to make before you start" section before you
-commit to a shape — one of those decisions, where the operator keystore backup
-lives, has no undo.
+The handbook for keeping a mesh alive and fixing it at 3am: seventeen runbooks, the
+standing obligations and where scheduled work actually runs, diagnosis organised by
+symptom rather than by task, every limit and the variable that changes it, and an
+explicit list of what it could not verify.
 
 ## What you are deploying
 
@@ -75,6 +87,8 @@ before you have agents depending on it.
 
 ## Reference
 
+- Planning and sizing: [docs/planning-and-sizing.md](docs/planning-and-sizing.md) —
+  <https://github.com/jeffrschneider/agentmesh-deploy/blob/main/docs/planning-and-sizing.md>
 - Operator handbook: [docs/operator-handbook.md](docs/operator-handbook.md) —
   <https://github.com/jeffrschneider/agentmesh-deploy/blob/main/docs/operator-handbook.md>
 - Protocol specification: <https://dev.agentmesh.ai/spec.html>

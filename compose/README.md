@@ -102,14 +102,21 @@ tenants continuously, which wants a directory resolver.
 
 ## Scaling, briefly
 
-Not much, on one host. `services` can run more than one replica and NATS queue
-groups will balance across them, with one exception: the activity service keeps
-usage counters in a local SQLite file, so two replicas keep two divergent sets of
-counters. Everything else the services own lives in JetStream and is shared.
+Not much, on one host, and less than you might assume. **Do not run a second
+`services` container.** No subscription in the services tier uses a NATS queue
+group, so NATS delivers every message to every subscriber: two instances would
+both do the work and both reply to a single request. On top of that, the activity
+service keeps usage counters in a local SQLite file and the console login hash is
+a separate local file, so both diverge per instance. One is the only supported
+count.
 
-Beyond one host, this composition is the same shape as the Kubernetes
-deployment: an elastic tier you can scale freely, and JetStream, which you
-cannot.
+`console` is different. It is static files with no state and no subscriptions, so
+it scales freely.
+
+Beyond one host, this composition is the same shape as the Kubernetes deployment:
+a broker you can cluster, a services tier pinned at one, and a console you can
+scale. What clustering the broker does and does not buy, and how to size any of
+it, is in [`../docs/planning-and-sizing.md`](../docs/planning-and-sizing.md).
 
 ## Verified
 

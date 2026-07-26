@@ -7,16 +7,26 @@
 #   kubectl -n agentmesh create secret generic sandbox-pool --from-file=./creds/pool/
 #   kubectl -n agentmesh apply -f mesh.yaml
 #
-# The shape to understand before reading further: everything here is either
-# ELASTIC or BALLAST, and they are different Kubernetes objects on purpose.
+# The shape to understand before reading further: three objects with three
+# different scaling rules, which is why they are three objects.
 #
-#   elastic  the services and the console. Stateless, their state lives in
-#            JetStream, they attach as NATS queue-group subscribers. Scale them
-#            freely; an autoscaler belongs here.
+#   elastic  the console. Static files, no state, no subscriptions. Scale it
+#            freely; an autoscaler belongs here and nowhere else.
+#   pinned   the services. Exactly one replica, and that is a correctness
+#            requirement rather than a cost choice: no subscription in the tier
+#            uses a NATS queue group, so NATS fans every request out to every
+#            subscriber and a second instance would both do the work and ANSWER
+#            a second time. Two local files (the usage counters and the console
+#            login hash) are per-replica on top of that.
+#            See docs/planning-and-sizing.md, section 4.3.
 #   ballast  nats. Raft-replicated JetStream. The replica count is a decision,
 #            not a dial. An autoscaler pointed at this will eventually eat data.
+#            Note what it does and does not buy: application streams and KV
+#            buckets are all single-replica today, so three servers give you
+#            connection failover, not data redundancy.
+#            See docs/planning-and-sizing.md, section 4.2.
 #
-# Never let one scaler see both.
+# Never let a scaler see anything but the console.
 
 ---
 apiVersion: v1
@@ -199,9 +209,12 @@ metadata:
   name: services
   namespace: agentmesh
 spec:
-  # Safe to raise: the services attach as queue-group subscribers, so NATS
-  # balances across them and unacked work redelivers if one dies. One caveat in
-  # the README about the activity service's local counters.
+  # NOT safe to raise, and this is not a throughput note. No subscription in the
+  # services tier uses a NATS queue group, so NATS delivers every message to
+  # every subscriber: two replicas would both do the work and both reply to a
+  # single request. The usage counters and the console login hash are per-replica
+  # local files as well. One is the only supported value. The README and
+  # docs/planning-and-sizing.md section 4.3 have the full reason.
   replicas: 1
   selector:
     matchLabels: { app: services }

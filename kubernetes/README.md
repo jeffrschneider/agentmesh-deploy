@@ -40,25 +40,37 @@ kubectl -n agentmesh port-forward svc/services 3001:3001 &
 kubectl -n agentmesh port-forward svc/nats-client 4443:4443 &
 ```
 
-## Two tiers, and only one of them is elastic
+## Three objects, three scaling rules, and only one of them is elastic
 
-The services and the console are stateless: their state lives in JetStream, and
-they attach as NATS queue-group subscribers, so NATS balances across replicas and
-unacked work redelivers if one dies. Raise `replicas`, add an HPA, scale on
-JetStream consumer backlog rather than CPU — a backed-up task manager looks idle.
+**The console is elastic.** Static files, no state, no subscriptions. Two replicas
+here is right and an autoscaler belongs on this Deployment. It is the only place
+one does.
 
-NATS is not that. JetStream is Raft-replicated, so three replicas means quorum is
-two, and the replica count is a decision rather than a dial. Never point an
+**The services are pinned at one replica, and that is a correctness requirement.**
+Three separate properties of the current build make a second instance wrong rather
+than merely slow. No subscription in the services tier uses a NATS queue group, so
+NATS delivers every message to every subscriber and two instances would both do
+the work and both reply to a single request. The activity service keeps usage
+counters in a SQLite file on its PVC, so two replicas keep two divergent sets, and
+fair-use enforcement reads those counters. The console login hash is a separate
+local file, so a second instance either has no login or a different one. Leave
+`replicas: 1` and do not point an HPA at it.
+[`../docs/planning-and-sizing.md`](../docs/planning-and-sizing.md) section 4.3 has
+the detail, and section 5.3 covers what that means for a rolling upgrade.
+
+**NATS is ballast.** JetStream is Raft-replicated, so three replicas means quorum
+is two, and the replica count is a decision rather than a dial. Never point an
 autoscaler at the StatefulSet. Scaling in is a runbook: check no stream is at
 minimum replicas, reassign, remove the peer, let the group settle, and only then
 reduce the StatefulSet. Shrinking it casually leaves orphaned PVCs and can drop
 you below quorum.
 
-One caveat on the services: the activity service keeps usage counters in a local
-SQLite file on its PVC, so two replicas keep two divergent sets of counters. The
-console login hash lives there too. Everything else is shared through JetStream.
-Raise replicas when you need throughput and accept that counters split, or leave
-it at one.
+Be clear about what three replicas buys, because it is less than it looks.
+**Every stream and KV bucket the platform creates is single-replica today**, so
+the registry, accounts, tasks, rooms, offline mail and the rest each live on one
+of the three servers with no copy on the other two. Connections fail over; data
+does not. That is a known gap, and section 4.2 of the planning document states it
+in full.
 
 ## Five things that will bite, all of which did
 
