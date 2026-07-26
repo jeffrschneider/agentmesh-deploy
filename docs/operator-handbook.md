@@ -299,15 +299,17 @@ consequences to be honest about:
 - Another provider means implementing those three methods and rebuilding the
   image. Nothing selects a provider at runtime; `RESEND_API_KEY` present or
   absent is the entire decision.
-- **The sending address is hardcoded** to `AgentMesh <noreply@agentmesh.ai>` in
-  all three send paths, with no environment override. Resend will not send from a
-  domain you have not verified, so your own Resend key against the published
-  image does not give you working mail — it gives you a rejected send. The same
-  applies to `MESH_CONSOLE_URL`, which defaults to the AgentMesh console's own
-  address and is what outbound mail links to.
+- **Set the sending address.** `MESH_MAIL_FROM` is the address mail comes from.
+  A provider will not send from a domain the account has not verified, so leaving
+  this at its default — the AgentMesh deployment's own address — gets your sends
+  rejected rather than delivered. A bare address is wrapped with `MESH_NAME`
+  (`noreply@example.com` becomes `Example Mesh <noreply@example.com>`), or pass
+  the full display form yourself. Set `MESH_CONSOLE_URL` too: it is the console
+  address embedded in outbound mail and it also defaults to ours.
 
-So the honest reading today: **a mesh you run is a sandbox-and-agents mesh unless
-you are prepared to change code.** That is a real and complete deployment —
+So the honest reading today: **accounts need a provider Resend's API shape fits,
+and a verified sending domain.** If you do not want either, a sandbox-and-agents
+mesh needs no mail at all. That is a real and complete deployment —
 agents connect with credentials you mint, register, discover each other, run
 tasks, and share rooms, none of which touches email. Deciding you want human
 sign-in is deciding to build the services yourself. Examples below use Resend
@@ -1512,12 +1514,11 @@ Then check the four things that produce mail that goes nowhere useful:
 - **`MESH_CONSOLE_URL`** is the console address embedded in outbound mail, and it
   defaults to the AgentMesh hosted console. Set it or your users are sent
   somewhere that is not yours.
-- **The sending address is hardcoded** to `AgentMesh <noreply@agentmesh.ai>` with
-  no environment override. A provider that verifies sending domains — Resend
-  does — will reject sends from a domain you do not own. This is the wall
-  described in the [decisions](#decisions-to-make-before-you-start): with the
-  published image, self-hosted mail does not work, and no amount of configuration
-  fixes it.
+- **`MESH_MAIL_FROM`** is the sending address. It defaults to the AgentMesh
+  deployment's own address, and a provider that verifies sending domains — Resend
+  does — will reject sends from a domain you do not own, so set it to an address
+  on a domain you have verified. A bare address is wrapped with `MESH_NAME`; a
+  `Name <addr>` form is passed through as given.
 - **Rate limits.** Sign-in links live 15 minutes and are limited to 5 per email
   address per 15 minutes.
 
@@ -1773,10 +1774,13 @@ source *after* the `0.2.0` images were published, and the images set
 later image will not. Read your boot log for the `[auth] email:` line rather than
 trusting either statement.
 
-**Self-hosted mail is not verified to work at all.** The sending address is
-hardcoded to a domain you do not own, and no code path overrides it. This is
-stated as a limitation rather than a workaround because no workaround was
-verified.
+**Self-hosted mail is configurable but unproven end to end.** `MESH_MAIL_FROM`
+and `MESH_CONSOLE_URL` are the two settings that used to be missing, and the
+sending address is no longer fixed to a domain you do not own. What has not been
+verified here is a full round trip on a third-party deployment: your provider
+account, your verified domain, a real sign-in link delivered and clicked. The
+settings exist and are unit-tested; the delivery path is yours to confirm once,
+and worth confirming before you rely on it.
 
 **Broker monitoring depends on which shape you chose.** The Kubernetes manifest
 sets `http: 8222` and probes `/varz`; the Compose bootstrap config sets no
