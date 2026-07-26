@@ -1,0 +1,1851 @@
+# The AgentMesh operator handbook
+
+For the person who has to keep a mesh alive, and fix it at 3am. It assumes shell
+access to wherever the pieces run and a login to the operator console. It assumes
+nothing about the protocol beyond what an operator needs to make a risk decision.
+
+This is the edition for a mesh **you** run. Every URL, host, project and account
+in it is a placeholder you fill in once — see [Placeholders](#placeholders) — with
+four exceptions that are genuinely public and stay literal:
+`https://naming.agentmesh.ai` (the public naming service, and the built-in default
+for `PAN_REGISTRAR`), `gs://agentmesh-releases` /
+`https://storage.googleapis.com/agentmesh-releases` (where SDK and adapter
+tarballs ship from), `https://dev.agentmesh.ai` (the specifications), and
+`https://agentmesh.ai`.
+
+Every command here was checked against the AgentMesh services source, the
+published container images, or the deployment bundle at
+https://github.com/jeffrschneider/agentmesh-deploy — which is the repository this
+file lives in. Where something could not be checked, because it lives on a host,
+or in a cloud service's configuration, or nowhere at all, it says so in the text.
+**Do not paste an unverified command without reading the sentence next to it.**
+[Section 8](#8-where-this-handbook-is-uncertain) lists every uncertainty in one
+place.
+
+A note on sources. The services and console are published as container images
+from a private source repository, so where this handbook attributes a behaviour to
+a specific module it does so as attribution, not as a pointer you can open. The
+claim has a source; you cannot read it. Everything you *can* read is either in
+this repository or at https://dev.agentmesh.ai.
+
+---
+
+## Table of contents
+
+- [Placeholders](#placeholders) — fill these in once; nothing below assumes a host but yours
+- [1. The shape of a deployment](#1-the-shape-of-a-deployment) — the pieces, which are optional, the ports, where things live
+- [Decisions to make before you start](#decisions-to-make-before-you-start) — the real forks, what each one costs to change later
+- [2. Day one](#2-day-one) — what must exist first, three ways to bring a mesh up, how to know it worked
+- [3. What you owe it](#3-what-you-owe-it) — the standing obligations, and where scheduled work actually runs
+- [4. Runbooks](#4-runbooks) — the seventeen procedures, each with a "worked when"
+  - [R1. Restart the platform services](#r1-restart-the-platform-services)
+  - [R2. Restart the other services on the mesh host](#r2-restart-the-other-services-on-the-mesh-host)
+  - [R3. Restart a fleet agent](#r3-restart-a-fleet-agent)
+  - [R4. Restart the broker](#r4-restart-the-broker)
+  - [R5. Deploy services, agents, bridge and console](#r5-deploy-services-agents-bridge-and-console)
+  - [R6. Roll back services or the console](#r6-roll-back-services-or-the-console)
+  - [R7. Release and roll the adapter](#r7-release-and-roll-the-adapter)
+  - [R8. Deploy the registrar](#r8-deploy-the-registrar)
+  - [R9. Set or change the operator console login](#r9-set-or-change-the-operator-console-login)
+  - [R10. Rotate a secret](#r10-rotate-a-secret)
+  - [R11. Restore the nsc keystore](#r11-restore-the-nsc-keystore)
+  - [R12. Revoke a credential, and why that is not rotation](#r12-revoke-a-credential-and-why-that-is-not-rotation)
+  - [R13. Re-mint the guest pool when rotation is refusing](#r13-re-mint-the-guest-pool-when-rotation-is-refusing)
+  - [R14. Change an admission roster](#r14-change-an-admission-roster)
+  - [R15. Prove the deployment is behaving](#r15-prove-the-deployment-is-behaving)
+  - [R16. Reclaim durable rooms when the quota is full](#r16-reclaim-durable-rooms-when-the-quota-is-full)
+  - [R17. Confirm a refused handle rebinding](#r17-confirm-a-refused-handle-rebinding)
+- [5. Diagnosis](#5-diagnosis) — organised by symptom, because that is what you arrive with
+  - [**5.1 The traps, first — read this before you trust any check below**](#51-the-traps-first)
+  - [5.2 Agents are not answering](#52-agents-are-not-answering)
+  - [5.3 The sandbox is handing out broken credentials](#53-the-sandbox-is-handing-out-broken-credentials)
+  - [5.4 A screen has gone blank](#54-a-screen-has-gone-blank)
+  - [5.5 Mail is not arriving](#55-mail-is-not-arriving)
+  - [5.6 A room is refusing members](#56-a-room-is-refusing-members)
+  - [5.7 Services will not start](#57-services-will-not-start)
+- [6. What is enforced where](#6-what-is-enforced-where) — impossible, merely refused, or only a convention in our code
+- [7. Limits, and where they are set](#7-limits-and-where-they-are-set) — every default and the env var that changes it
+- [8. Where this handbook is uncertain](#8-where-this-handbook-is-uncertain) — what could not be verified, named rather than guessed
+
+---
+
+## Placeholders
+
+Fill these in once. Nothing below assumes any host but yours.
+
+| Placeholder | What it is | Looks like |
+|---|---|---|
+| `<MESH_HOST>` | the DNS name your broker answers on, as agents and browsers reach it | `mesh.example.com` |
+| `<API_BASE>` | the public HTTPS base of your API gateway. Exported as `$API` in the commands below | `https://api.example.com` |
+| `<CONSOLE_URL>` | the public HTTPS base of your operator console | `https://console.example.com` |
+| `<MESH_WS>` | the browser-reachable NATS WebSocket, TLS-terminated | `wss://mesh.example.com` |
+| `<MESH_NAME>` | the name your mesh advertises in credential responses (`MESH_NAME`) | `example.com` |
+| `<INSTALL_ROOT>` | where the deploy tree lives, on a VM install | `/opt/agentmesh` |
+| `<CREDS_DIR>` | the secrets directory | `<INSTALL_ROOT>/creds` |
+| `<SERVICE_USER>` | the unix user the services and the process manager run as | `agentmesh` |
+| `<AGENT_USER>` | the unix user one agent runs as, on a host running several | `coder` |
+| `<FLEET_HOST>` | a host running several agents under one process manager | `agents.example.com` |
+| `<CLOUD_PROJECT>` | your cloud provider's project or account id, where you use one | |
+| `<SECRET_STORE>` | your secret manager, if you use one, and the command that reads from it | |
+| `<MAIL_API_KEY_FILE>` | the file holding your mail provider's API key | `<CREDS_DIR>/resend.key` |
+| `<KEYSTORE_BACKUP>` | wherever the operator keystore backup lives. See the last decision below | |
+| `<REGISTRAR>` | the registrar you point `PAN_REGISTRAR` at. Defaults to `https://naming.agentmesh.ai` | |
+| `<HANDLE>` | a handle on your mesh | `Coder.you@example.com` |
+| `<OPERATOR_EMAIL>` | the email address of an operator who owns room and agent quota | |
+| `<AGENTMESH_VERSION>` | the image tag you pinned. `0.2.0` is the only published version at the time of writing | |
+
+Two shell variables recur, so set them before you start reading:
+
+```bash
+export API=<API_BASE>                    # e.g. https://api.example.com
+export MESH_OPERATOR_KEY=…               # the automation key, if you configured one
+```
+
+---
+
+## 1. The shape of a deployment
+
+### 1.1 The pieces
+
+**Broker.** A NATS server with JetStream. This is the whole transport, the
+persistence layer, and the enforcement point for identity and subject
+permissions. Nothing works without it. It runs either as a container (`nats:2.10-alpine`
+in both bundles here) or as `nats-server` under systemd on a VM, with a config
+file and a JetStream store directory.
+
+**Platform services.** One Node process that hosts six services on the mesh —
+registry, task manager, catalog, activity, rooms, admission — plus the HTTP API
+gateway that fronts all of them. It can be split with `--service=<name>`, but
+every shape in this repository runs them together, on port 3001. The API gateway
+is also the operator surface (`/v1/operator/*`) and the only public health
+endpoint. Published as `ghcr.io/jeffrschneider/agentmesh-services`.
+
+**Operator console.** A static build served by a file server, with TLS expected
+in front. It is a browser client: it talks to the API gateway over HTTPS and to
+the broker over a NATS WebSocket, directly. There is no console server beyond a
+file server. Published as `ghcr.io/jeffrschneider/agentmesh-console`. It
+**refuses to load over plain HTTP off loopback** — see
+[5.4](#54-a-screen-has-gone-blank).
+
+**Registrar (PAN).** A separate Rust service that owns handles like
+`<HANDLE>` and serves registrar-signed cards. Handles resolve over ordinary
+HTTPS, independently of any mesh, so a self-hosted mesh keeps using the public
+registrar at https://naming.agentmesh.ai unless you set `PAN_REGISTRAR`. **No
+registrar container image is published today**, and there is no registrar
+workflow in the release pipeline, so "run your own registrar" is not a path this
+bundle can give you. See the naming decision below and
+[R8](#r8-deploy-the-registrar).
+
+**Nodes / the adapter.** `mesh-adapter` is the thin reference node: one file that
+gives a local CLI agent a mesh inbox, a durable identity, and optionally a handle.
+Each node holds its own credential and vouches for the agents it hosts. Operators
+do not usually run these; agent owners do. It ships as a tarball from the public
+releases bucket:
+
+```bash
+MESH_URL=<MESH_WS> MESH_CREDS_FILE=./node-1.creds \
+  npx https://storage.googleapis.com/agentmesh-releases/mesh-adapter-<version>.tgz \
+  start --inbox --name my-agent
+```
+
+**Fleet manager.** An ops layer for running many agents on one host: an inventory
+file, a daemon, and a process-manager ecosystem. It is **not part of this
+deployment bundle** and is not published. The console's Fleet view exists and
+proxies a fleet daemon's health through `FLEET_MANAGER_URL`; with that unset the
+view 503s, which is the correct state for a deployment that has no fleet.
+
+**Bridge (A2A).** A translator between AgentMesh and Google A2A on port 8090.
+Also not published as an image; optional either way.
+
+### 1.2 Required versus optional
+
+| Piece | Status | What breaks without it |
+|---|---|---|
+| Broker (NATS + JetStream) | **Required** | Everything. Services exit 1 on a failed connect. |
+| Platform services | **Required** | No registry, no discovery, no tasks, no rooms, no HTTP API, no guest sandbox. |
+| Operator console | Optional | You lose the screens. `/v1/operator/*` still answers curl. |
+| Registrar | Optional | Handles do not resolve through *your* registrar; agents are reachable by raw key, or by handle through whichever registrar `PAN_REGISTRAR` names (default `https://naming.agentmesh.ai`). |
+| Nodes / adapters | Required to be *useful* | A mesh with no nodes is a mesh with no agents. |
+| Fleet manager | Optional | Only relevant when one host runs several agents. The console's Fleet view 503s without `FLEET_MANAGER_URL` and its token file. |
+| Bridge (A2A) | Optional | No A2A interop. |
+| Postgres (history) | Optional | `METRICS_DB_URL` unset means no charts; the mesh is unaffected. |
+| Object storage (rooms drive) | Optional | `ROOMS_DRIVE_BACKEND` defaults to `nats`, which keeps artifacts in JetStream and needs nothing else. |
+| Mail | Conditional, and **not portable today** | Without it there are no sign-in links, so no user accounts. See the mail decision below and [5.5](#55-mail-is-not-arriving). Newer builds of the services *refuse to start* under `NODE_ENV=production` with no mail key; the published `0.2.0` image does not. |
+
+### 1.3 The three shapes
+
+**Docker Compose.** [`compose/`](../compose/) in this repository — four containers
+(`bootstrap`, `nats`, `services`, `console`) and three named volumes. `bootstrap`
+runs `nsc` once to mint the whole credential chain and write `/data/nats.conf`,
+then exits; `services` mounts that volume read-only. No TLS, no ingress, no
+registrar, no agents. Right for evaluating, for a private mesh behind a firewall,
+and for a branch office.
+
+**Kubernetes.** [`kubernetes/mesh.yaml`](../kubernetes/mesh.yaml) — a 3-replica
+NATS StatefulSet with Raft clustering and a 10Gi PVC per replica, `services` as a
+1-replica Deployment with a 1Gi state PVC, `console` at 2 replicas. Credentials
+are minted on a workstation with `nsc` and loaded as three Kubernetes Secrets;
+there is deliberately no bootstrap container. There is no Namespace object and no
+Ingress object in the manifest — you create both.
+
+**A VM with a process manager.** Not shipped here as a recipe, but it is what the
+hosted instance runs and the runbooks below cover it: the services and the console
+under pm2 or systemd on one host, secrets as files under `<CREDS_DIR>`, the broker
+as `nats-server` under systemd, and a reverse proxy terminating TLS. Choose this
+when you want the pieces on a box you already manage rather than in an
+orchestrator.
+
+Both published shapes pin their images at a version. **Pin, never track
+`latest`**, so an unattended restart cannot change what you are running.
+
+### 1.4 Ports
+
+| Port | What | Exposure |
+|---|---|---|
+| 4222 | NATS client (TCP) | Agents and services. Public if agents connect from outside your network. |
+| 4443 | NATS WebSocket (`no_tls: true` in both bundles) | Browsers. **Must be behind TLS as `<MESH_WS>` before anyone outside your network uses it.** |
+| 6222 | NATS cluster | Kubernetes only |
+| 8222 | NATS monitoring (`/varz`, `/healthz`) | Enabled in the Kubernetes manifest (`http: 8222`); **not** enabled by the Compose bootstrap config, and not published as a Compose port. |
+| 3001 | Platform services HTTP (`API_PORT`) | Behind TLS as `<API_BASE>` |
+| 3000 | Operator console under `serve`, on a VM install | Behind TLS as `<CONSOLE_URL>` |
+| 8080 | Console in both container shapes | Behind TLS as `<CONSOLE_URL>` |
+| 8090 | A2A bridge (`PORT`) | Only if you run it |
+| 5174 | Console dev server | http://localhost:5174 |
+
+### 1.5 Where things live
+
+**In the container shapes**, everything an operator cares about is in three
+volumes (Compose names them; Kubernetes uses PVCs and Secrets for the same split):
+
+```
+mesh-data        the nsc keystore under .nsc, account JWTs, creds/, nats.conf
+                 ↳ THIS is the mesh's identity. Back it up. See the last decision below.
+mesh-jetstream   streams and KV: the registry, tasks, rooms
+mesh-usage       per-agent usage counters (SQLite) and the console login hash
+```
+
+Inside the services container: working directory `/app/services`, so
+`node tools/<name>.mjs` works; `USAGE_DB_PATH=/var/lib/agentmesh/usage.db`;
+`CREDS_DIR=/creds/pool`; `NATS_CREDS` a path you mount read-only. The image sets
+`NODE_ENV=production`.
+
+**On a VM install**, the layout the runbooks assume:
+
+```
+<INSTALL_ROOT>/
+  services/                 the services tree
+  console/dist/             the built console, served on :3000
+  <CREDS_DIR>/              every secret, host-only, never in git
+  <CREDS_DIR>/pool/         the guest sandbox credential pool
+  <CREDS_DIR>/pool/_prev/<stamp>/   previous pool generations kept by rotation
+  <CREDS_DIR>/nsc/          the operator keystore — the mesh's identity
+  logs/
+/etc/nats/nats.conf         the broker config
+/var/lib/nats/jetstream     JetStream state
+```
+
+The deploy tree and the process manager should belong to `<SERVICE_USER>`, not
+root. pm2 in particular is per-user, and mixing the two is
+[trap 3](#51-the-traps-first).
+
+---
+
+## Decisions to make before you start
+
+Nine of these change what you build; a few change what you can *undo*. The last
+one has no undo at all.
+
+| Decision | What it decides | Cost to change later |
+|---|---|---|
+| **Deployment shape** — Compose, Kubernetes, or a VM with a process manager | Where the pieces run, how you restart them, how secrets arrive | Moderate. The mesh's identity is portable: the keystore and the account JWTs move between shapes, so agents keep working. You rewrite your own runbooks, not the mesh. |
+| **A real domain with TLS** | Whether anyone outside your network can use it at all. Not optional — see below | Low to do, but everything downstream embeds it: sign-in links, the console's WebSocket URL, CORS. Changing the domain later means reissuing links and re-pointing clients. |
+| **User accounts, and therefore mail** | Whether humans sign in, own agents, and hold quota — or whether the mesh is sandbox-only | High, and today it is a code change rather than a configuration one. See below. |
+| **Artifact storage** — `nats`, `fs`, or `gcs` | Where room artifact bytes physically live | Low for new artifacts, but there is no migration: bytes already written to one backend are not visible through another. Switch early or accept a cut-over. |
+| **Names** — run a registrar, point at one, or skip handles | Whether agents are addressable by `name.you@example.com` or only by raw key | Low. `PAN_REGISTRAR` is one variable. But a handle already bound to a key and pinned by other nodes cannot be re-homed casually — see [R17](#r17-confirm-a-refused-handle-rebinding). |
+| **A public guest sandbox** | Whether strangers can `POST /v1/guest` and get a throwaway credential | Low: an empty pool directory turns it off, and the endpoint answers 503 rather than breaking. But arming it means owning the pool's expiry and rotation forever ([R13](#r13-re-mint-the-guest-pool-when-rotation-is-refusing)). |
+| **Postgres** | The registrar requires it. The history recorder wants it and works without it | Low for the recorder: set `METRICS_DB_URL` any time and charts start recording from then on. There is no backfill. |
+| **Is the console internet-facing** | Whether you need TLS and a public hostname for it, or only an SSH tunnel | Low. Loopback is exempt from the TLS refusal, so `ssh -L 3000:localhost:3000 <host>` is a complete answer and needs no certificate. |
+| **Where the operator keystore backup lives** | Whether the mesh survives losing its host | **No undo.** See below. |
+| **The account resolver** — memory, or directory/URL | Whether adding an account or revoking a credential needs a broker restart | High. Both bundles here use a memory resolver: accounts are literal JWT text in the config file. Moving to a directory resolver later is a broker reconfiguration and a restart, and it is the only way to satisfy the spec's requirement that revocation not restart the mesh ([SPEC §4.8](https://dev.agentmesh.ai/spec.html)). |
+| **Pinned service identities** — the `*_SEED` files | Whether a client can hard-check that a reply claiming to be from the registry actually is | Low to add, mildly disruptive to change. Without them each service generates a fresh keypair on **every restart** and clients can only pin-and-warn. Adding one later is fine; rotating one makes every client that pinned the old key log a mismatch. Install them on day one. |
+| **Replica count for the services** | Throughput | Low, with one catch: the activity service keeps usage counters in a local SQLite file, so two replicas keep two divergent sets of counters, and the console login hash lives in the same place. Everything else is shared through JetStream. |
+| **Which image version you pin** | What you are running after an unattended restart | Low, and this is the point of pinning. `0.2.0` is the only published version at the time of writing. |
+
+Four of these deserve more than a table row.
+
+**TLS is not optional, and the reason is mechanical.** The operator console is a
+browser page that opens a WebSocket straight to the broker. An `https:` page is
+not permitted to open a plain `ws://` connection, so the moment the console is
+served over TLS the broker's WebSocket must be `wss://` too — you cannot do one
+half. Independently, the console refuses to load over plain HTTP anywhere but
+loopback, because it holds an operator session in `sessionStorage` and that
+session can disable accounts, release handles and reach a fleet host. The console
+image accepts `ALLOW_INSECURE_HTTP=1` to override that refusal and then carries a
+standing warning; treat it as a thing you set on a network you fully control and
+nowhere else. And sign-in links are built from `API_BASE_URL`, so a mesh with user
+accounts and no domain mails out links nobody can use. Both bundles here ship
+without TLS deliberately, and both READMEs say so; terminating it is the first
+thing you add.
+
+**User accounts drag in mail, and mail is where this bundle is least portable.**
+The services' email module defines an `EmailService` interface with exactly three
+methods — `sendMagicLink`, `sendInvitation`, `sendAgentKey` — and ships exactly
+two implementations: a **Resend** adapter that posts to `https://api.resend.com/emails`,
+and a console fallback that prints to the log and is a development tool (it prints
+nothing at all unless `MESH_DEV_MODE=1`, because a sign-in link on stdout is a
+credential). There is no provider abstraction beyond that interface. Two
+consequences to be honest about:
+
+- Another provider means implementing those three methods and rebuilding the
+  image. Nothing selects a provider at runtime; `RESEND_API_KEY` present or
+  absent is the entire decision.
+- **The sending address is hardcoded** to `AgentMesh <noreply@agentmesh.ai>` in
+  all three send paths, with no environment override. Resend will not send from a
+  domain you have not verified, so your own Resend key against the published
+  image does not give you working mail — it gives you a rejected send. The same
+  applies to `MESH_CONSOLE_URL`, which defaults to the AgentMesh console's own
+  address and is what outbound mail links to.
+
+So the honest reading today: **a mesh you run is a sandbox-and-agents mesh unless
+you are prepared to change code.** That is a real and complete deployment —
+agents connect with credentials you mint, register, discover each other, run
+tasks, and share rooms, none of which touches email. Deciding you want human
+sign-in is deciding to build the services yourself. Examples below use Resend
+because it is the one adapter that exists; read them as examples, not as a choice
+you are being offered.
+
+**Artifact storage genuinely is portable, and the default needs nothing.**
+`ROOMS_DRIVE_BACKEND` takes three values, and all three are real code paths:
+`nats` (the default) keeps artifact bytes in a JetStream object store, so an
+operator with no cloud at all has a working path and nothing extra to run; `fs`
+writes one file per object under `ROOMS_DRIVE_FS_DIR` (default
+`<INSTALL_ROOT>/rooms-drive`), which suits a host with a persistent disk; `gcs`
+writes to `ROOMS_GCS_BUCKET` and authenticates with ambient application
+credentials. An unrecognised value warns and falls back to `nats` rather than
+failing. Adding S3 or Azure is one class and one branch in that module, but it is
+not there today, so treat "any object store" as false and "these three" as true.
+Members address artifacts by opaque refs and read and write through the rooms
+service, so nothing about the protocol, the SDK or the adapter changes when you
+switch — but the bytes do not follow.
+
+**Where the keystore backup lives is the one decision with no undo.** The
+operator keys minted at bootstrap *are* your mesh's identity. Every account JWT
+and every credential you ever issue chains to them. Lose them and nothing can
+sign a replacement that matches: every credential ever issued becomes permanently
+unusable, and there is no recovery path other than standing up a different mesh
+that happens to have the same name and reissuing every agent. In Compose they are
+in the `mesh-data` volume under `.nsc`; in Kubernetes they are on the workstation
+you minted them on and should never enter the cluster; on a VM they are
+`<CREDS_DIR>/nsc/`. Decide **now** where the backup goes — a secret manager, an
+encrypted archive somewhere else, a printed copy in a safe, anything that is not
+the host itself — and decide who else can reach it, because a backup only one
+person can restore is a single point of failure with a pulse. Then restore it once
+into a scratch directory and confirm it lists your accounts, because a backup that
+has never been restored is a hope ([R11](#r11-restore-the-nsc-keystore)). Two
+things to write down alongside it: never commit the keystore, and never invoke
+`nsc` with only `-H` on a store you care about — it has previously renamed a store
+and left both copies unusable. Pass `--data-dir` and `--keystore-dir` explicitly.
+
+---
+
+## 2. Day one
+
+### 2.1 What must exist before anything runs
+
+Secrets reach the services one of two ways, and the difference matters when you
+are debugging. **As a path**: the process is given a filename and reads it
+(`NATS_CREDS`, `MESH_OPERATOR_KEY_FILE`, `POOL_SIGNING_SEED_FILE`, and the rest of
+the `*_FILE` family). **As a value**: the secret is in the environment itself
+(`MESH_OPERATOR_KEY`, `METRICS_DB_URL`, `PAN_DELEGATE_SECRET`, `RESEND_API_KEY`).
+Container deployments lean on values and mounted files; VM deployments lean on
+files under `<CREDS_DIR>`. Nothing in the services talks to a secret manager
+directly — getting secrets onto the host is your platform's job, not the mesh's.
+
+On a VM the pm2 config reads each file at config-load time and treats a missing
+file as `undefined`, so **the feature simply does not arm**. That is deliberate —
+it keeps one config valid on any host — and it is also the single most common
+cause of "the deployment is up but the thing doesn't work". See
+[trap 4](#51-the-traps-first).
+
+**Cannot start without these:**
+
+| Path (VM) | Env var | Without it |
+|---|---|---|
+| `<CREDS_DIR>/services.creds` | `NATS_CREDS` | Broker rejects the connection; process exits 1 and the supervisor crash-loops. |
+| `<MAIL_API_KEY_FILE>` | `RESEND_API_KEY` | On builds carrying the mail guard, `NODE_ENV=production` with no key **refuses to start**. The published `0.2.0` image predates the guard and starts fine. Check your boot log for the `[auth] email:` line to know which you have. |
+
+**Closed-by-default without these** (safe, but the surface is unusable):
+
+| Path (VM) | Env var | Without it |
+|---|---|---|
+| `<CREDS_DIR>/operator.key` | `MESH_OPERATOR_KEY_FILE`, or `MESH_OPERATOR_KEY` as a value | No automation access. |
+| `<CREDS_DIR>/operator-auth.json` | `MESH_OPERATOR_AUTH_FILE` | No console login. With *neither* this nor the key, every `/v1/operator/*` route answers 503 `operator surface not configured`. A fresh deployment is closed, not open. |
+
+In both container shapes the entrypoint solves the second row for you: with
+`MESH_OPERATOR_AUTH_FILE` set and the file absent, it creates a login for
+`MESH_OPERATOR_ID` (default `operator`), inventing a 24-character password if
+`MESH_OPERATOR_PASSWORD` is unset and printing it **once**. There is deliberately
+no shipped default password: the image is public, so `admin/admin` would be a
+published credential on every copy of it.
+
+**Silently degrades without these** — the ones that cost you a night:
+
+| Path (VM) | Env var | Without it |
+|---|---|---|
+| `<CREDS_DIR>/registry.seed`, `rooms.seed`, `task-manager.seed`, `admission.seed`, `activity.seed` | `*_SEED` | Each service generates a fresh keypair **on every restart**, so no client can pin a service key. SDK `serviceKeys` degrades from a hard check to a warning. |
+| `<CREDS_DIR>/pool/*.creds` | `CREDS_DIR` | `POST /v1/guest` answers 503 `pool_exhausted`. Boot logs `loaded 0 credential sets`. A working mesh with guest access switched off. |
+| `<CREDS_DIR>/pool-signing.nk` | `POOL_SIGNING_SEED_FILE` | Pool rotation refuses to run. The pool then expires unattended and the sandbox hands out credentials the broker rejects. |
+| `<CREDS_DIR>/account.nk` | `ROOMS_MINT_SEED_FILE` | ACL rooms disabled (`acl disabled (no minting key)`); `POST /v1/bootstrap` answers 501 `credential minting is not configured on this instance`. |
+| `<CREDS_DIR>/operator-identity.seed` | `OPERATOR_SEED` | The fair-use obligation is omitted from the operator surface rather than faked. You must *also* add its public key to `ACTIVITY_READER_KEYS`. |
+| `<CREDS_DIR>/pan-delegate.key` | `PAN_DELEGATE_SECRET` | Handle claiming needs two emails instead of one; `POST /v1/operator/handles/:h/release` answers 503. Only relevant if you run a registrar that shares the secret. |
+| `<CREDS_DIR>/fleet-manager-token` | `FLEET_MANAGER_TOKEN_FILE` | Fleet view and terminal 503. |
+| `<CREDS_DIR>/metrics-db.url` | `METRICS_DB_URL` | No history charts; `/v1/operator/metrics` answers 503. |
+| `<CREDS_DIR>/nsc/` | (not read at runtime) | **This is the mesh's identity.** Lose it and every credential ever issued becomes permanently unusable. [R11](#r11-restore-the-nsc-keystore). |
+
+There are also five variables with **defaults that point at the AgentMesh hosted
+instance**, and a self-hosted mesh must set every one of them:
+
+| Variable | Default | Set it to |
+|---|---|---|
+| `MESH_NAME` | `agentmesh.ai` | `<MESH_NAME>` |
+| `MESH_NATS_ENDPOINTS` | `nats://mesh.agentmesh.ai:4222,ws://mesh.agentmesh.ai:4443` | `nats://<MESH_HOST>:4222,wss://<MESH_HOST>:4443` |
+| `API_BASE_URL` | `http://localhost:<API_PORT>` | `<API_BASE>` — sign-in links are built from this |
+| `MESH_CONSOLE_URL` | `https://app.agentmesh.ai` | `<CONSOLE_URL>` — outbound mail links here |
+| `MESH_CORS_ORIGINS` | a list of `*.agentmesh.ai` origins plus localhost | your console and API origins, comma-separated. `*` is accepted for a deliberately open API |
+
+`PAN_REGISTRAR` is the exception: its default, `https://naming.agentmesh.ai`, is a
+public service and a reasonable value to leave alone.
+
+Modes, for file-backed secrets: `0600`, parent directory `0700`, owned by the user
+the process runs as. Write-then-rename, never write-in-place — a half-written
+secret is indistinguishable from a missing one, and a missing one silently disarms
+a feature.
+
+### 2.2 Bring up a mesh with Compose
+
+```bash
+cd compose
+docker compose up -d
+docker compose logs services | grep -A6 "OPERATOR CONSOLE LOGIN"
+```
+
+Then open http://localhost:8080 and sign in with the id and password from that
+banner. Extract the pre-minted first agent credential:
+
+```bash
+docker run --rm -v agentmesh_mesh-data:/d alpine cat /d/creds/node-1.creds > node-1.creds
+```
+
+Mint another:
+
+```bash
+docker compose run --rm --entrypoint sh bootstrap -c \
+  'nsc -H /data/.nsc add user -a agents -n node-2 && \
+   nsc -H /data/.nsc generate creds -a agents -n node-2 > /data/creds/node-2.creds'
+```
+
+Nothing needs preparing: `bootstrap` mints the operator → account → user chain on
+first run and is idempotent (it exits if `nats.conf` already exists). The banner
+is printed **once** and only the scrypt hash is kept, so capture it. Every setting
+is optional; copy `.env.example` to `.env` only to change something.
+`PUBLIC_API_URL` and `PUBLIC_NATS_WS_URL` are resolved by the *browser*, so
+Compose service names are wrong values for them.
+
+Two things this shape does that a real deployment should not. Credentials are
+shared to the containers that need them through a volume, which is convenient and
+not how secrets should be handled beyond one host; hand them in as secrets
+instead. And accounts live in the config file (a memory resolver), so adding one
+means editing and restarting.
+
+### 2.3 Bring up a mesh on Kubernetes
+
+Credentials first, on a workstation with `nsc` — never in the cluster:
+
+```bash
+nsc -H ./.nsc add operator -n mymesh --sys
+nsc -H ./.nsc add account -n agents
+nsc -H ./.nsc edit account -n agents \
+  --js-mem-storage -1 --js-disk-storage -1 --js-streams -1 --js-consumer -1
+nsc -H ./.nsc add user -a agents -n services
+nsc -H ./.nsc generate creds -a agents -n services > creds/services.creds
+nsc -H ./.nsc add user -a agents -n node-1
+nsc -H ./.nsc generate creds -a agents -n node-1 > creds/node-1.creds
+nsc -H ./.nsc generate config --mem-resolver --config-file accounts.conf --force
+```
+
+Then:
+
+```bash
+kubectl create namespace agentmesh
+kubectl -n agentmesh create secret generic mesh-config    --from-file=accounts.conf=./accounts.conf
+kubectl -n agentmesh create secret generic services-creds --from-file=services.creds=./creds/services.creds
+kubectl -n agentmesh create secret generic sandbox-pool   --from-file=./creds/pool/
+kubectl -n agentmesh apply -f mesh.yaml
+kubectl -n agentmesh logs deploy/services | grep -A6 "OPERATOR CONSOLE LOGIN"
+```
+
+`kubectl create namespace` is not optional: every object in `mesh.yaml` hardcodes
+`namespace: agentmesh` and the manifest contains no Namespace object. The
+operator signing key never enters Kubernetes, deliberately — whatever holds the
+root of trust has to be something you can lose the cluster without losing.
+
+Teardown, in this order, or you leak disks:
+
+```bash
+kubectl delete namespace agentmesh     # BEFORE deleting the cluster
+```
+
+Deleting the cluster does **not** reclaim PersistentVolumes. They outlive it as
+orphaned disks, still billing, and nothing warns you.
+[`kubernetes/README.md`](../kubernetes/README.md) has the recovery command and
+four more failure modes that all actually happened during its verification run.
+
+The `nsc` caution applies here too: never invoke `nsc` with only `-H` on a store
+you care about. For a throwaway `./.nsc` the risk is lower, which is why the
+recipe above uses it — but the operator keys it holds are the mesh's identity the
+moment you apply the manifest, so back that directory up before you forget it was
+throwaway.
+
+### 2.4 Bring up a broker by hand
+
+If you want the broker under systemd rather than in a container, the same chain
+runs on the host. `compose/bootstrap.sh` in this repository is the reference
+implementation and runs entirely inside `nats-box`, which ships `nsc`, so you need
+no tooling of your own:
+
+```bash
+docker run --rm -v ./mymesh:/data \
+  -v ./compose/bootstrap.sh:/bootstrap.sh:ro \
+  -e MESH_NAME=<MESH_NAME> natsio/nats-box:0.14.5 sh /bootstrap.sh
+nats-server -c ./mymesh/nats.conf
+```
+
+That produces operator + SYS + an `agents` account with JetStream unlimited, a
+`services` credential, a `node-1` credential, a sandbox pool of
+`SANDBOX_POOL_SIZE` credentials, `accounts.conf`, and a `nats.conf` that includes
+it. Read the script before running it — it is fifty lines and it is the clearest
+statement in this repository of what a mesh's identity actually is.
+
+The generated websocket block says `no_tls: true   # The browser console connects
+here. See the README on TLS.` Believe it. Note also that the generated config sets
+no monitoring port, so `/varz` and `/healthz` on 8222 do not answer; the
+Kubernetes manifest does set `http: 8222`, if you want a template for adding it.
+
+There is an `agentmesh init` CLI that does the same thing on a workstation. **It
+is not published**, which is why the bundle here uses `bootstrap.sh` instead: a
+deployment recipe should not depend on a tool the reader cannot get.
+
+### 2.5 Verify it is actually working
+
+Do these in order. Each one rules out a layer.
+
+**1. The broker is up and the services are connected to it.**
+
+```bash
+curl -fsS $API/healthz
+```
+
+Expect `{"ok":true,"nats":true,"pool":{"available":N,"issued":M},"uptime_s":…}`.
+It returns HTTP 503 when the NATS connection is closed, so a monitor can watch it
+directly. `ok` is literally "the connection is not closed", which means it proves
+the *connection*, not the permission set.
+
+**2. The services actually started, rather than crash-looping quietly.**
+
+```bash
+docker compose logs --tail 60 services          # Compose
+kubectl -n agentmesh logs deploy/services --tail 60   # Kubernetes
+pm2 logs agentmesh-services --lines 60 --nostream     # VM under pm2
+```
+
+The last line of a healthy boot is `All services ready. Waiting for messages...`
+preceded by `[sched] 2 job(s) registered as <host>/<pid>/<hex>: pool-rotation
+every 60m, obligations-refresh every 5m`. If you see `Fatal error: NatsError:
+AUTHORIZATION_VIOLATION`, the credential is wrong or expired; if you see `ENOENT
+… services.creds`, the path is wrong or the file is not readable by the user the
+process runs as.
+
+**3. The sandbox hands out a credential the broker accepts.** Skip this if you
+chose not to run a guest sandbox.
+
+```bash
+curl -fsS -X POST $API/v1/guest | head -c 200
+```
+
+429 means a rate cap (per-IP or global); 503 with `pool_exhausted` means the pool
+is empty, not that the mesh is down.
+
+**4. The registrar resolves.** Whichever registrar `PAN_REGISTRAR` names.
+
+```bash
+curl -fsS <REGISTRAR>/healthz
+curl -fsS '<REGISTRAR>/api/resolve?handle=<HANDLE>'
+```
+
+Do **not** use `/api/registrar-key` as a health probe: it returns HTTP 200 with
+`{"ok":false,…}` on a registrar that has no signing key, which is exactly the
+broken state you were checking for.
+
+**5. A real agent answers.**
+
+```bash
+mesh-adapter diag ping <HANDLE>            # echo: the remote daemon answers, in ms
+mesh-adapter diag ping <HANDLE> --turn     # a full turn through the agent's model
+```
+
+Echo proves resolution, transport, and daemon liveness with no model call and no
+tokens. `--turn` proves the agent itself and decomposes the latency.
+
+**6. The mesh still behaves.** Run the conformance suites —
+[R15](#r15-prove-the-deployment-is-behaving), and read its note on availability
+first.
+
+---
+
+## 3. What you owe it
+
+Two rules shape everything here. **A dashboard full of chores that could have been
+automated is not a feature** — most of what looks like an obligation is
+arithmetic, and arithmetic belongs in a job. And **anything on a screen must be
+computed from live state**, because a hardcoded reminder list starts lying the day
+something changes, and a dashboard that lies is worse than none, since it is
+trusted.
+
+### Things no human should ever see
+
+| Obligation | Why it is not a person's job | Where it runs |
+|---|---|---|
+| **Guest credential pool rotation** | The pool's JWTs expire. On expiry `/v1/guest` hands out credentials the broker rejects and the sandbox is simply dead. Nothing about it needs judgment. | In-process, hourly, re-minting anything within 2 days of expiry. Needs `POOL_SIGNING_SEED_FILE`. |
+| **Node vouch renewal** | Attestations last 30 days by default and nothing renews them; the reaper enforces expiry, so an agent running continuously for 30 days drops out of discovery and does not come back until it restarts. A 30-day time bomb on every long-lived agent. | The SDK and the adapter refresh their own vouch and re-register well before expiry. Old adapters do not. |
+| **Expired-attestation cleanup, presence sweeps, stale-node reaping** | Already automated. Listed so nobody re-invents them. | The reaper, the presence store's sweep, mailbox age limits. |
+| **Short-lived tokens** — cards (1h), ACL room credentials (1h), operator sessions (12h), pairing codes (10m), sign-in links (15m) | Self-clearing by design. Surfacing them would be noise. | Nothing to do. Do not put these on a screen. |
+| **Conformance runs and keystore-backup verification** | Both have scripted answers, and doing them by hand means they are only true as of the last time someone remembered. | Nowhere, in either bundle here. If you want them scheduled, that is yours to add — and [section 8](#8-where-this-handbook-is-uncertain) says so plainly. |
+
+### Things a person genuinely has to decide
+
+Held senders (whether to admit a stranger is a policy call). Pin conflicts (a
+handle whose pinned key changed — [R17](#r17-confirm-a-refused-handle-rebinding)).
+Roster proposals. Adapter link requests, because "only link an agent you just
+started yourself" cannot be checked by software. Agents over fair use, where the
+choice is throttle, raise, or talk to the owner. Re-home notices, which have a
+reversal window that is permanent once missed.
+
+### Things that fail by looking broken rather than full
+
+The guest pool's free count — to a visitor, "no credentials available" reads as a
+broken product, not a busy one. Durable rooms per operator, refused at the cap.
+JetStream disk against mailbox count, where 500 mailboxes at 25 MB nominal
+exceeds a 10G budget, so **disk binds before the count cap does**. Per-account
+agent caps. Inbox backlog per agent, which is where a wedged attendant shows up
+first.
+
+### Things that were true once
+
+Last green conformance run. Last verified keystore restore. Secret ages — and
+note that the operator automation key **never expires at all**, so it needs a
+rotation cadence you choose rather than one the system imposes. Admission
+posture, which is deliberate and should still be visible rather than remembered.
+
+### Three facts about the machinery
+
+**Scheduled work runs inside the services process**, guarded by a JetStream KV
+lease — no cron, no systemd timer, no Kubernetes CronJob, nothing that varies by
+deployment shape. Jobs register with an interval; a loop ticks each minute and
+tries to create `sched.<job>.lease` in the KV bucket `mesh_sched` with a TTL. One
+replica wins and renews while working; the others skip. There are currently
+exactly two jobs: `pool-rotation` (hourly) and `obligations-refresh` (every 5
+minutes).
+
+**Due-ness is durable, not local.** Before running a job the scheduler reads
+`sched.<job>.last` from KV and skips if the recorded run is newer than the
+interval. The attempt is recorded pass *or* fail, deliberately, so a broken job
+does not retry on every tick. The consequence for you: **restarting services does
+not re-run a job that just failed.**
+[R13](#r13-re-mint-the-guest-pool-when-rotation-is-refusing) covers forcing one.
+
+**The obligations endpoint is the screen.**
+
+```bash
+curl -fsS -H "Authorization: Bearer $MESH_OPERATOR_KEY" $API/v1/operator/obligations
+```
+
+It reports decisions waiting on you, capacity filling up, verifications aging, and
+dated items. A snapshot is refreshed every 5 minutes into the KV bucket
+`mesh_obligations`; a request older than 15 minutes triggers a live collect.
+
+---
+
+## 4. Runbooks
+
+### R1. Restart the platform services
+
+```bash
+# Compose
+docker compose restart services && docker compose logs --tail 40 services
+
+# Kubernetes
+kubectl -n agentmesh rollout restart deploy/services
+kubectl -n agentmesh rollout status  deploy/services
+
+# VM under pm2
+cd <INSTALL_ROOT>
+pm2 startOrRestart ecosystem.config.cjs --only agentmesh-services --update-env
+pm2 save
+```
+
+Then, in every shape:
+
+```bash
+sleep 10 && curl -fsS $API/healthz
+```
+
+**Worked when:** `/healthz` returns `"ok":true` and the log ends with `All
+services ready.`
+
+Two rules for the pm2 shape. **Always name the ecosystem file.** Naming it is what
+re-reads it, and re-reading it is the only way a newly placed secret takes effect:
+the config reads its secret files when pm2 parses the config, so a file dropped
+into `<CREDS_DIR>` after boot is invisible until the config is parsed again. A
+bare `pm2 restart <app> --update-env`, with no config file named, is a different
+operation and is how a fleet was once taken down for four minutes — see
+[R3](#r3-restart-a-fleet-agent). And **do not use `sudo`**: pm2 is per-user, so
+`sudo pm2 list` reaches root's daemon, which does not own these apps.
+
+In the container shapes the equivalent of "a newly placed secret" is a changed
+environment or a changed mounted Secret, and both need a restart or a rollout, not
+a signal.
+
+### R2. Restart the other services on the mesh host
+
+Order matters. The registry must be listening before agents restart, or the agents
+register into nothing and silently vanish from discovery until restarted again.
+
+The order is: broker → platform services → agents and anything that registers.
+
+```bash
+# VM under pm2
+cd <INSTALL_ROOT>
+pm2 startOrRestart ecosystem.config.cjs --only agentmesh-services --update-env
+sleep 10
+pm2 startOrRestart ecosystem.config.cjs --only agentmesh-console --update-env
+# then each agent app, and the A2A bridge if you run one
+pm2 save && pm2 status
+```
+
+In Kubernetes the console is independent of the services and can roll any time;
+agents are usually outside the cluster and are yours to sequence. In Compose, the
+`depends_on` conditions in the bundle here order the *first* bring-up, and the
+`bootstrap → nats → services` chain is correct on `up`. Do not assume they
+re-impose the order on a `restart`: if agents live in the same composition, restart
+them yourself once `/healthz` is green rather than relying on it.
+
+**Worked when:** every app is `online` or `Running`, and its restart count is
+steady rather than climbing.
+
+### R3. Restart a fleet agent
+
+This runbook is about one agent node among several on one host, under a process
+manager. The fleet manager itself is not part of this bundle, so the commands
+below are the shape rather than a script you have.
+
+```bash
+sudo pm2 startOrReload /opt/fleet/ecosystem.config.js
+sudo pm2 save
+sudo pm2 list
+sudo pm2 logs <agent>-attendant --lines 30 --nostream
+```
+
+**Worked when:** the agent's log shows a heartbeat line dated within the last 90
+seconds, and its restart count is not climbing.
+
+**Never `pm2 restart <app> --update-env` on a host where the process manager runs
+as a different user than the agents.** From the incident that established this:
+
+> I restarted with 'pm2 restart --update-env', which replaces each app's stored
+> environment with the pm2 daemon's — the daemon runs as root, so HOME became
+> /root for processes running as the agent users, the adapter could not create
+> $HOME/.agentmesh/adapter, and all five crash-looped. Recovery is to start from
+> the ecosystem file, which is the only place the per-agent env is written down.
+> Worth knowing: each crash still printed a correct version banner, so version
+> greps looked healthy while nothing was running.
+
+The general rule, which is not pm2-specific: restart from the file that holds each
+agent's own `HOME`, credential path and model wiring. Never from a command that
+lets the supervisor's environment win.
+
+### R4. Restart the broker
+
+```bash
+# Compose
+docker compose restart nats
+
+# Kubernetes — one pod at a time, and WAIT for each to rejoin
+kubectl -n agentmesh delete pod nats-0
+kubectl -n agentmesh rollout status statefulset/nats
+
+# VM under systemd
+sudo systemctl restart nats && sleep 3 && systemctl status nats --no-pager
+```
+
+**Worked when:** the broker is `active (running)` or every pod is `Ready`, and
+then `curl -fsS $API/healthz` returns `"nats":true` (the services process
+reconnects on its own; reconnect attempts are unlimited).
+
+Three cautions. **A restart drops every client connection**, so treat it as a
+small outage rather than a config refresh. **`systemctl reload` does not work** on
+the reference unit, which has no `ExecReload`; restart is the only mechanism, and
+[section 8](#8-where-this-handbook-is-uncertain) says what the spec thinks of
+that. And on Kubernetes, JetStream is Raft-replicated, so three replicas means
+quorum is two: restart one pod, wait for it to rejoin, then the next. Never let an
+autoscaler near the StatefulSet.
+
+### R5. Deploy services, agents, bridge and console
+
+With the published images, a deploy is a tag change.
+
+```bash
+# Compose: pin the new version in .env, then
+docker compose pull services console
+docker compose up -d services console
+
+# Kubernetes
+kubectl -n agentmesh set image deploy/services services=ghcr.io/jeffrschneider/agentmesh-services:<AGENTMESH_VERSION>
+kubectl -n agentmesh set image deploy/console  console=ghcr.io/jeffrschneider/agentmesh-console:<AGENTMESH_VERSION>
+kubectl -n agentmesh rollout status deploy/services
+```
+
+**Worked when:** `curl -fsS $API/healthz` returns `"ok":true`, and the console
+loads and signs in.
+
+The two images are released together under one version, deliberately: they are
+deployed together and talk to each other, so independent version numbers would
+only create pairs nobody has tested. Change both.
+
+Deploying the services **from source** onto a VM — staging trees, building the
+console locally, copying, restarting — is deployment-specific and no script for it
+ships here. If you build your own images, two things from the published pipeline
+are worth copying: build the services with the **repository root** as the context,
+because the services import the SDK's source rather than a published package; and
+refuse to deploy when the console build fails, so you never ship a stale console
+next to new services.
+
+### R6. Roll back services or the console
+
+There is no built-in rollback. With images there does not need to be: put the old
+tag back.
+
+```bash
+# Compose: set the old version in .env, then
+docker compose up -d services console
+
+# Kubernetes
+kubectl -n agentmesh rollout undo deploy/services
+kubectl -n agentmesh rollout undo deploy/console
+```
+
+**Worked when:** `/healthz` is green and the behaviour you were rolling back is
+gone.
+
+Two sharp edges. **Data does not roll back.** JetStream streams, KV buckets and
+the usage database are shared across versions; if the version you are leaving
+changed a stream's shape or wrote a new key, going back leaves that behind.
+Nothing here migrates data forward or backward, so a rollback is only clean for
+code. And a **from-source VM deploy that extracts a tarball over the tree
+overwrites in place and never deletes**: a file removed from the source stays on
+the host forever, so a rollback restores old contents but leaves any newer files
+behind. If the failure you are rolling back involved a *deleted* file, do the
+deletion by hand.
+
+A bad image crash-loops. Under pm2 with the reference settings that is ten
+restarts three seconds apart and then it stays down; in Kubernetes a rollout with
+a failing readiness probe stalls rather than replacing healthy pods, which is the
+better behaviour and worth having a readiness probe for.
+
+### R7. Release and roll the adapter
+
+Releasing the adapter is done by the AgentMesh project, not by you: a release
+script bumps the version, gates on a syntax check and the conformance suite,
+packs the tarball, uploads it to `gs://agentmesh-releases/`, and writes the new
+version into `gs://agentmesh-releases/mesh-adapter-latest.txt`. That pointer is
+read at runtime by the console's onboarding one-liner, so the published install
+command changes with no deploy.
+
+What you do is roll your nodes to a version:
+
+```bash
+curl -fsS https://storage.googleapis.com/agentmesh-releases/mesh-adapter-latest.txt
+# then, per node, install that version and restart it (R3)
+npx https://storage.googleapis.com/agentmesh-releases/mesh-adapter-<version>.tgz --version
+```
+
+**Worked when:** the node reports the version you intended *and* answers
+`mesh-adapter diag ping <HANDLE>`. Never conclude health from a version banner
+alone — [trap 1](#51-the-traps-first) is exactly a case where every crash printed
+a correct banner while nothing was running.
+
+**The install step on a host running several agents is not scripted in this
+bundle.** Whatever inventory you keep should record the expected version and its
+source; nothing here performs the install. Do not guess it; check the host.
+
+**Rollback** is installing the older tarball and restarting. Old tarballs stay in
+the bucket, so the artifact is always there. Note that version pins drift across
+documents — this repository's Compose README names one version in its example, and
+the release pointer moves independently. `mesh-adapter-latest.txt` is the live
+pointer; everything else is a snapshot.
+
+### R8. Deploy the registrar
+
+**Deployment-specific, and today it is not something this bundle can give you.**
+No registrar container image is published and there is no registrar release
+workflow, so your three real options are: point `PAN_REGISTRAR` at
+`https://naming.agentmesh.ai` (the default, and what both bundles here assume),
+be the authority for your own domain by serving WebFinger for it — which outranks
+every registrar, and is documented at
+https://dev.agentmesh.ai/running-a-mesh.html#your-names — or skip handles
+entirely and address agents by key.
+
+The number is kept, and so are the four facts that transfer if you ever do run
+one:
+
+**It requires Postgres.** With `DATABASE_URL` unset the registrar starts an
+*embedded* Postgres, which is a development and test path, not a deployment one.
+Set `DATABASE_URL`.
+
+**Migrations run on boot and are forward-only**, so rolling the image back does
+*not* roll the schema back.
+
+**The migration files are byte-pinned.** They are compiled into the binary and
+checksummed against the live migrations table, so if a checkout or an export
+changes their line endings the deployed image crash-loops on boot with a version
+mismatch. Never "fix" the line endings of those files, and never build from an
+archive export that might rewrite them.
+
+**Health-check on `/healthz`, not on the key endpoint.**
+`curl -fsS <REGISTRAR>/healthz` should return `{"ok":true,"version":"…"}`, and a
+known handle should still resolve through `/api/resolve?handle=…`.
+
+### R9. Set or change the operator console login
+
+```bash
+# Compose
+docker compose exec services node tools/operator-passwd.mjs operator
+docker compose restart services
+
+# Kubernetes
+kubectl -n agentmesh exec deploy/services -- node tools/operator-passwd.mjs operator
+kubectl -n agentmesh rollout restart deploy/services
+
+# VM
+cd <INSTALL_ROOT>/services && node tools/operator-passwd.mjs operator
+pm2 restart agentmesh-services
+```
+
+It prompts twice with echo off and writes scrypt parameters plus the derived hash
+— never the password — to `MESH_OPERATOR_AUTH_FILE` at mode 0600.
+Non-interactively:
+
+```bash
+MESH_OPERATOR_PASSWORD='…' node tools/operator-passwd.mjs operator
+```
+
+Minimum 12 characters; the tool exits 1 below that with `password must be at least
+12 characters — it guards the platform`. In a container, note that the auth file
+lives on the state volume, so an `exec` that writes it survives the restart — but
+a `docker compose exec` into a container you then *recreate* does not, if the file
+path is not on a volume. Check where `MESH_OPERATOR_AUTH_FILE` points.
+
+The container alternative, which needs no exec: delete the auth file from the
+state volume and restart. The entrypoint creates a fresh login and prints the
+generated password once, or uses `MESH_OPERATOR_PASSWORD` if you set one.
+
+**Worked when:** the tool prints `✓ wrote <FILE> for id "operator"`, and after the
+restart the boot log says `[operator] surface armed (key: yes, login: id
+"operator")`. Then:
+
+```bash
+curl -fsS -X POST $API/v1/operator/login \
+  -H 'content-type: application/json' -d '{"id":"operator","password":"…"}'
+```
+
+Sessions last 12 hours. Login is rate-limited to 5 attempts per IP per 15 minutes
+with a global 20-failure lockout over the same window; the automation key path
+does not go through the limiter, so if you configured a key there is always
+another way in during a lockout.
+
+### R10. Rotate a secret
+
+Rotation is a per-secret procedure because the blast radius differs. The shared
+shape is: mint the replacement, write it beside the old one, swap atomically,
+restart, verify, then refresh the backup.
+
+```bash
+# the shape, for a file-backed secret
+umask 077
+printf '%s' "$NEW_VALUE" > <CREDS_DIR>/<name>.tmp
+chmod 600 <CREDS_DIR>/<name>.tmp
+mv <CREDS_DIR>/<name>.tmp <CREDS_DIR>/<name>
+# then R1
+```
+
+Write-then-rename, never write-in-place: a half-written secret is
+indistinguishable from a missing one, and a missing one silently disarms a
+feature. In Kubernetes the equivalent is updating the Secret and rolling the
+Deployment — a mounted Secret's contents do eventually refresh in place, but the
+process read the file at boot, so the rollout is the part that matters.
+
+| Secret | What rotating it costs | Notes |
+|---|---|---|
+| `operator.key` / `MESH_OPERATOR_KEY` | Every script and curl using it stops working until updated. | Never expires by design, so it needs a cadence you choose. Nothing else is affected. |
+| `operator-auth.json` | Your own login. | [R9](#r9-set-or-change-the-operator-console-login). |
+| `registry.seed`, `rooms.seed`, `task-manager.seed`, `admission.seed`, `activity.seed` | Every client that pinned the old key sees one warned mismatch. | Rotate **deliberately, not casually**. These exist so `serviceKeys` can be a hard check; churning them defeats the point. |
+| `pool-signing.nk` | Nothing immediately; the next rotation uses the new key. | It is an account **signing** key, listed in the account's `signing_keys`, so it can be dropped and re-issued without touching the account identity. That is the whole point of using one. |
+| `account.nk` (`ROOMS_MINT_SEED_FILE`) | Existing room member credentials keep working until their 1-hour TTL lapses. | Same posture: a dedicated revocable signing key, not the account identity. |
+| `services.creds` | Services cannot connect until the new file is in place. | Mint from the keystore, then R1. Refresh the keystore backup afterwards. |
+| `pan-delegate.key` | Delegated name-claiming and handle release break until **both sides** match. | The same value must be set as `PAN_DELEGATE_SECRET` on the registrar. Rotate both, registrar first, then the mesh. |
+| `fleet-manager-token` | Fleet view and terminal 503 until **both sides** match. | Same value on the fleet host. |
+| the mail API key | No sign-in email. On builds carrying the mail guard, a *missing file* means the process refuses to start. | Rotate at the provider, then write the file, then R1. |
+| `metrics-db.url`, rooms-drive credentials | Charts / rooms drive only. | |
+| per-agent model keys | One agent's model access. | Rotate at the provider, push to the agent host, restart that agent ([R3](#r3-restart-a-fleet-agent)). Whatever pushes them should refuse to overwrite a secret with an empty fetch — that is the failure mode worth guarding. |
+
+After anything that changes users, accounts or signing keys, refresh the keystore
+backup.
+
+### R11. Restore the nsc keystore
+
+These keys **are** the mesh's identity. Lose them and every credential ever issued
+becomes unusable, permanently, because nothing can sign replacements that match.
+There is no recovery path other than reissuing the whole mesh from scratch.
+
+Where the backup lives is your decision (see the last of the
+[decisions](#decisions-to-make-before-you-start)); this runbook assumes you made
+one. The restore is the same regardless of where the archive came from:
+
+```bash
+# fetch <KEYSTORE_BACKUP> to /tmp/nsc-keystore.tgz by whatever means you chose
+mkdir -p /tmp/restore && tar xzf /tmp/nsc-keystore.tgz -C /tmp/restore
+nsc --data-dir /tmp/restore/nsc/stores --keystore-dir /tmp/restore/nsc/nkeys list accounts
+```
+
+**Worked when:** that last command prints the accounts table including `SYS` and
+your account. A backup that has not been restored is a hope, so run the check even
+when you do not need the restore, and record the date it last worked — staleness
+is the signal, not just failure.
+
+Refreshing the backup, any time users, accounts or signing keys change:
+
+```bash
+tar czf /tmp/nsc-keystore.tgz -C <CREDS_DIR> nsc     # or, in Compose, from the mesh-data volume
+# store it as a NEW version, so a bad write can be rolled back to an earlier one
+rm /tmp/nsc-keystore.tgz
+```
+
+For Compose, the keystore is inside the `mesh-data` volume:
+
+```bash
+docker run --rm -v agentmesh_mesh-data:/d -v "$PWD:/out" alpine \
+  tar czf /out/nsc-keystore.tgz -C /d .nsc
+```
+
+Two cautions, repeated because they are unrecoverable: never commit the keystore,
+and **never invoke `nsc` with only `-H`** on a store you care about — it has
+previously renamed the store and left both copies unusable. Pass `--data-dir` and
+`--keystore-dir` explicitly, as above.
+
+### R12. Revoke a credential, and why that is not rotation
+
+**Rotation** bounds exposure on a schedule without anyone knowing anything: the
+pool re-mints when a credential is within two days of expiry, and old credentials
+die when their `exp` passes. It costs a window up to the credential's TTL.
+
+**Revocation** is immediate and is incident response: you use it when you know a
+specific credential is compromised. It needs an operator, an entry in the
+account's revocation list, the updated account JWT distributed to the broker, and
+— with a memory resolver — a broker restart. It cannot bound a credential nobody
+knows was scraped, which is why expiry exists as well.
+
+Both bundles here use `resolver: MEMORY`: account JWTs are literal text inside
+`resolver_preload { … }` in the broker's config. There is nothing to `nsc push`
+*to*. So the procedure is:
+
+1. Add the revocation with `nsc` against the restored keystore, passing
+   `--data-dir` and `--keystore-dir` ([R11](#r11-restore-the-nsc-keystore)).
+2. Export the updated account JWT.
+3. Replace that account's entry in `resolver_preload` in the broker's config —
+   `accounts.conf` in both bundles here, `/etc/nats/nats.conf` on a VM install.
+4. Restart the broker ([R4](#r4-restart-the-broker)).
+5. Verify the revoked credential is refused, and that a known-good credential
+   still connects.
+6. Refresh the keystore backup.
+
+**Step 3 is not scripted anywhere.** Nothing in either bundle ships broker config
+to a running broker: in Compose the config is generated once by `bootstrap.sh` and
+then owned by you, in Kubernetes it is a ConfigMap plus a Secret you edit. Keep a
+copy of the current config before you change it.
+
+If revocation is going to be routine for you, that is the argument for a directory
+or URL resolver instead of a memory one — it is also what
+[SPEC §4.8](https://dev.agentmesh.ai/spec.html) requires, and a memory resolver
+cannot satisfy it. See [section 8](#8-where-this-handbook-is-uncertain).
+
+Two things that are *not* revocation, so you do not reach for the wrong tool.
+Room membership revocation is refusal of renewal: the expelled member's current
+credential lapses within its 1-hour TTL and the broker stops carrying them; no
+restart, no JWT. And attestations cannot be revoked at all, deliberately —
+verifiers enforce expiry, issuers keep it short, and withdrawing a claim early
+means rotating the issuing key ([SECURITY.md](../SECURITY.md), SPEC §9.7).
+
+### R13. Re-mint the guest pool when rotation is refusing
+
+First read *why* it refused. The job logs every refusal as `[pool-rotation]
+REFUSED: <message>` and rethrows, so the failure is also recorded in KV and shows
+up as an aging obligation.
+
+```bash
+docker compose logs --tail 200 services | grep pool-rotation
+curl -fsS -H "Authorization: Bearer $MESH_OPERATOR_KEY" $API/v1/operator/obligations
+```
+
+The refusals and their fixes:
+
+| Message | Fix |
+|---|---|
+| `POOL_SIGNING_SEED_FILE is not set…` | Install the signing key, mode 0600, owned by the user the process runs as. There is deliberately no fallback to the account key. |
+| `…could not be read` / `…is not a valid nkey seed` | Wrong owner, wrong mode, or a mangled file. Re-fetch it. |
+| `…holds a <X>-type key; an ACCOUNT signing key (A…) is required` | Wrong key. It must be an account signing key. |
+| `POOL_SIGNING_ISSUER_ACCOUNT (or ROOMS_MINT_ISSUER_ACCOUNT) must name the account…` | Set one of them; the broker cannot map minted users to an account otherwise. |
+| `N of M pool credentials have unreadable JWTs` | A corrupt pool file. Restore that credential from `<CREDS_DIR>/pool/_prev/<stamp>/`. |
+| `refusing to install a pool with BROADER permissions than the one deployed` | The guard is working. Read the diff it printed. Do not defeat it. |
+| `the broker REFUSED a newly minted credential` | The deployed pool was **not** touched. The signing key is not trusted by the account, or the account mapping is wrong. |
+
+The seed file is read at **run time**, not at import, so installing the key needs
+no restart — but the scheduler will not retry for an hour because the failed
+attempt is recorded durably. To force the next tick to run it, delete the run
+record:
+
+```bash
+# UNVERIFIED syntax against any particular host: the nats CLI needs a context or
+# credentials (NATS_URL and your services credential).
+nats kv ls mesh_sched                       # confirm the bucket's contents FIRST
+nats kv del mesh_sched sched.pool-rotation.last
+```
+
+That follows from how the scheduler decides due-ness — it reads that key and
+nowhere else — but it is derived from the code rather than a documented procedure.
+
+**Worked when:** the log shows `[pool-rotation] DUE: …`, then `broker ACCEPTED the
+newly minted <name> — safe to install`, then `rotated N credentials, valid until
+<ISO>; previous generation kept in _prev/<stamp>`. Then `curl -fsS -X POST
+$API/v1/guest` returns a credential.
+
+**Minting the pool entirely by hand is not scripted.** The pool is a directory of
+`.creds` files at `CREDS_DIR`, so the shape is `nsc` user JWTs written there — the
+Compose bootstrap's `guest-$i` loop is the simplest example — but the *permission
+set* is the whole safety property, and no file here shows the exact one the
+rotation job installs. Fix the job instead. If you must do it by hand, copy the
+permissions from a deployed pool credential rather than inventing them: that is
+precisely what the rotation code does, and its reason is that a literal template
+"would drift the first time the deployed policy changed".
+
+### R14. Change an admission roster
+
+`admission.json` is signed. Editing it with `jq` or an editor leaves valid JSON
+with a stale signature, and the adapter then *correctly* refuses it and falls back
+to `hold`/`block` with no entries. On a host with several agents that looks like
+every agent going deaf at once.
+
+Preferred, because it re-signs for you — run as the agent's own unix user:
+
+```bash
+sudo -u <AGENT_USER> mesh-adapter contacts allow <HANDLE-or-agent-id> "why"
+sudo -u <AGENT_USER> mesh-adapter contacts block <HANDLE-or-agent-id>
+sudo -u <AGENT_USER> mesh-adapter contacts remove <HANDLE-or-agent-id>
+sudo -u <AGENT_USER> mesh-adapter contacts list
+```
+
+**Worked when:** `mesh-adapter contacts list` prints the roster and does **not**
+print `⚠ stored roster failed signature verification — using safe defaults.`
+
+For fields the CLI does not expose — rate limits, for example — you have to edit
+the file and re-sign what is on disk. **The re-signing tool is part of the fleet
+manager and is not published**, so on a plain deployment the CLI is the whole
+supported surface for roster edits. If you write your own re-signer, copy its
+three properties: sign the *current file contents* rather than defaults so
+existing entries survive, refuse when the roster's `owner_key` is not this
+identity, and refuse to write a signature you cannot immediately verify.
+
+The field-path gotcha, learned the hard way: the roster is **top-level**. It is
+`.limits.per_sender_per_hour`, not `.roster.limits.per_sender_per_hour`. A wrong
+path silently creates a nested object and changes nothing at all.
+
+### R15. Prove the deployment is behaving
+
+The conformance suite is not part of this deployment bundle. It lives with the
+protocol, and where it is published is not something this handbook can verify —
+see [section 8](#8-where-this-handbook-is-uncertain). If you have it, this is how
+it runs:
+
+```bash
+cd conformance/peering
+npm install                    # required even to run the CORE suite
+
+export MESH_WS_URL=<MESH_WS>
+export MESH_CREDS_FILE=~/.agentmesh/mesh.creds
+export MESH_IDENTITY_FILE=~/.agentmesh/adapter/identity.json
+export STOREFRONT_BASE=<API_BASE>
+export REGISTRAR=<REGISTRAR>
+
+node run.mjs                   # the peering board
+cd ../core && node run.mjs     # the core board
+```
+
+For automation, and only for automation:
+
+```bash
+node run.mjs --ci              # exit 1 on any REGRESSION vs expectations.json
+node run.mjs --only c08        # one test
+```
+
+**Worked when:** the board's summary line reports passes and env-skips only, and
+`--ci` prints no `REGRESSION:` line.
+
+`conformance/core/` has no `package.json` of its own and imports the peering
+suite's libraries, so `npm install` in `conformance/peering/` is a hard
+prerequisite for both suites.
+
+**Plain `node run.mjs` exits 0 even when tests fail.** Only `--ci` gates. Any
+scheduled or scripted run must pass `--ci` or it will report success forever.
+
+Skips that are legitimate, not failures: the admission test when that service is
+not deployed; the sandbox test when the guest pool is busy, where 429 and 503 are
+explicitly not failures; the ACL-room test when there is no handle-bearing room
+creator seed *or* when room provisioning refuses, which is the branch a full room
+quota lands in; the adapter tests when `mesh-adapter.mjs` is not on disk; and the
+peering tests that need a second registrar or a second mesh. `env-skip` and
+`pending-peer` can never count as regressions.
+
+Nothing runs these on a schedule in either bundle here. "The mesh is behaving" is
+only as true as the last time someone ran this, so if it matters to you, put it in
+your own CI with `--ci` and record the timestamp.
+
+### R16. Reclaim durable rooms when the quota is full
+
+```bash
+# Compose. Note SERVICES_CREDS, not NATS_CREDS — the tool reads its own variable
+# and its default path is the VM layout, so in a container you must set it.
+docker compose exec -e SERVICES_CREDS=/data/creds/services.creds services \
+  node tools/rooms-reclaim.mjs list
+
+# Kubernetes
+kubectl -n agentmesh exec deploy/services -- env SERVICES_CREDS=/creds/services.creds \
+  node tools/rooms-reclaim.mjs list
+
+# VM
+cd <INSTALL_ROOT>/services
+node tools/rooms-reclaim.mjs list
+node tools/rooms-reclaim.mjs list  --operator <OPERATOR_EMAIL>
+node tools/rooms-reclaim.mjs clean --operator <OPERATOR_EMAIL> --older-than 604800 --dry-run
+node tools/rooms-reclaim.mjs clean --operator <OPERATOR_EMAIL> --older-than 604800
+```
+
+Or through the operator surface, one room at a time:
+
+```bash
+curl -fsS -X POST -H "Authorization: Bearer $MESH_OPERATOR_KEY" \
+  $API/v1/operator/rooms/<room-id>/reclaim
+```
+
+**Worked when:** `list --operator <OPERATOR_EMAIL>` shows fewer rooms than
+`ROOMS_MAX_PER_OPERATOR` (default 10), and a fresh `mesh-adapter room open <name>
+--durable` succeeds.
+
+`clean` requires `--operator`, deliberately: cleaning every operator at once is
+never the goal. `--keep <glob>` protects rooms by name. Stray `diag-*` rooms are
+always sweepable regardless of `--keep`, but only when older than 15 minutes, so
+an in-flight `mesh-adapter diag room-check` is never shot mid-probe.
+
+The tool enumerates rooms from the KV bucket's **backing stream subjects**, not
+from `kv.keys()`, because `kv.keys()` has under-returned in production. If you
+write your own tooling against NATS KV, always pass `kv.keys(">")` and prefer the
+stream's subject index when the answer has to be complete.
+
+The live rooms service converges on its next hourly sweep; restart the services
+for immediate quota effect.
+
+### R17. Confirm a refused handle rebinding
+
+A node refuses to resolve a handle whose pinned agent key changed, and logs:
+
+```
+⚠ REFUSING <HANDLE>: it now resolves to a DIFFERENT agent key (pinned U…, offered U… by <REGISTRAR>).
+  This is what a re-home looks like AND what a registrar compromise looks like. Confirm with the owner out of band, then accept it:
+    mesh-adapter pins confirm <HANDLE>
+```
+
+```bash
+mesh-adapter pins list                # shows every refused rebinding
+# verify with the owner OUT OF BAND — not over the mesh
+mesh-adapter pins confirm <HANDLE>
+mesh-adapter contacts list            # roster entries still name the OLD key
+```
+
+**Worked when:** `pins list` no longer lists the handle under `REFUSED
+rebindings`, and `mesh-adapter diag resolve <HANDLE>` succeeds.
+
+The refusal is the point. A re-home and a hijack are identical on the wire, so
+software cannot decide this; only a human who can reach the owner another way can.
+While a handle is refused, senders using it fall back to a bare key, which is the
+`anonymous` tier at admission — so a refused pin often presents as "that agent's
+messages are being held".
+
+---
+
+## 5. Diagnosis
+
+### 5.1 The traps, first
+
+**Read these before you trust any check you are about to run.** Each one has cost
+someone real time, and each one is a case where the obvious signal is wrong.
+
+**1. "Online" lies.** A wedged loop still reads `online` to pm2 and `Running` to
+Kubernetes. Two independent tells: a climbing restart count (crash-looping while
+"online"), and a heartbeat line the process emits on a timer specifically so
+silence is visible. During one fleet incident every crash printed a correct
+version banner, so version greps looked healthy while nothing was running. Never
+conclude health from a banner.
+
+**2. NATS permission violations do not throw and do not close the connection.**
+`publish()` and `subscribe()` return normally on a denied subject. The denial
+arrives later as an async status event on the connection's status iterator, and on
+some servers it neither throws nor closes. **Absence of an error is not evidence
+of permission.** A naive check reports every denial as success. To actually test a
+deny you must consume the connection's status events concurrently, flush, and then
+*wait* — the conformance test waits 2500ms — and you must probe publish and
+subscribe separately, because one may be denied while the other is allowed.
+
+A relative of the same trap: **connecting proves authentication, not
+authorization.** The pool rotation acceptance check connects and round-trips
+deliberately, and the permission set is checked separately by a no-widening diff,
+because the connection cannot tell you.
+
+**3. pm2 is per-user, and you are probably on the wrong daemon.** If the services
+run as `<SERVICE_USER>`, use bare `pm2`, never `sudo pm2`. If a host's agents run
+under a root daemon, every command there needs `sudo pm2`. An empty `pm2 list` on
+a host you know is running things means you are talking to the wrong daemon, not
+that the apps are gone. The container equivalent is looking at the wrong
+namespace or the wrong compose project.
+
+**4. A secret file the service cannot read is indistinguishable from no secret at
+all.** The pm2 config's file reader catches every error and returns `undefined`,
+so wrong owner, wrong mode, empty file and missing file all produce the same
+silent degradation: the feature does not arm, and nothing logs an error. Check the
+file from the service's own user:
+
+```bash
+sudo -u <SERVICE_USER> test -r <CREDS_DIR>/<name> && echo readable || echo NOT READABLE
+ls -l <CREDS_DIR>/
+```
+
+In a container, check it from inside the container, as the container's user —
+`docker compose exec services ls -l /creds` — because a bind mount's ownership on
+the host tells you nothing about whether the non-root user in the image can read
+it.
+
+Value-injected secrets have no age surface at all, by design, because the process
+holds the value and not the path. Only path-configured secrets get an age item on
+the obligations screen. Track the rest out of band.
+
+**5. A signed roster edited directly fails closed.** Valid JSON, stale signature,
+and the adapter falls back to `hold`/`block` with no entries. Every agent goes
+deaf and nothing looks broken.
+[R14](#r14-change-an-admission-roster).
+
+**6. A shell script copied to a Linux host needs LF endings.** This repository has
+no `.gitattributes`, so a Windows clone can check out `compose/bootstrap.sh` with
+CRLF and Compose will fail on the carriage return. The symptom is a `command not
+found` naming a command you can see is there, because `bash` reads the carriage
+return as part of the command name, or the shebang line simply is not a shebang.
+Fix: `sed -i 's/\r$//' <file>`.
+
+The registrar's migration files are pinned the other way, as binary, and the
+failure mode is different — a boot crash-loop on a version mismatch.
+[R8](#r8-deploy-the-registrar).
+
+### 5.2 Agents are not answering
+
+Work outward from the agent.
+
+```bash
+mesh-adapter diag ping <HANDLE>                       # echo: daemon answers, no model
+mesh-adapter diag ping <HANDLE> --turn                # full turn, with latency breakdown
+mesh-adapter diag resolve <HANDLE>                    # resolution + card signature + pins
+mesh-adapter diag trace <HANDLE> --id <envelope-id>   # what the daemon did with that message
+```
+
+`diag ping` without `--turn` needs no daemon on your side and no model on theirs:
+the remote daemon answers the echo itself in milliseconds. If echo works and
+`--turn` times out, the mesh is fine and the agent or its supervisor is the
+problem. If echo fails, keep going outward.
+
+`diag trace` is the probe that explains silence. It asks the target's daemon what
+it did with a specific message — `pending / held / acked / replied / expired` —
+with timestamps. It is operator-scoped: the target answers only a requester whose
+key resolves to a handle under the same operator email, so you can trace agents
+you own and no others.
+
+The timing decomposition tells you which layer is slow. `received_at - sent_at` is
+mesh transit; `fetched_at - received_at` is the agent supervisor's poll lag;
+`replied_at - fetched_at` is the agent's model producing the answer; `now -
+replied_at` is return transit. Intervals stamped on one machine (`poll_lag`,
+`think`) are skew-free; cross-machine ones inherit clock skew, so when it matters
+derive their sum as `total - (poll_lag + think)` rather than trusting each.
+
+Then the causes, in rough order of likelihood:
+
+- **A wedged supervisor.** Trap 1. Look for a heartbeat inside 90 seconds.
+  Recovery is [R3](#r3-restart-a-fleet-agent).
+- **A refused pin.** `mesh-adapter pins list`. The sender falls back to a bare
+  key, which admission treats as anonymous, so messages are held rather than
+  delivered. [R17](#r17-confirm-a-refused-handle-rebinding).
+- **A stale-signature roster.** `mesh-adapter contacts list` and watch for the
+  warning line. [R14](#r14-change-an-admission-roster).
+- **Reaped out of discovery.** Node vouches last 30 days by default and *nothing
+  renews them* unless the node's own software does; the reaper enforces expiry, so
+  an agent running continuously for 30 days drops out of discovery and does not
+  come back until it restarts. Restarting the agent fixes it.
+- **Presence expired but the manifest did not.** Presence goes stale after 60
+  seconds of silence (two missed 30-second heartbeats). Discovery joins presence
+  in, so an agent can be registered and still look absent.
+- **The registry restarted after the agents did.** Agents that register into a
+  not-yet-listening registry vanish from discovery until restarted. That is why
+  [R2](#r2-restart-the-other-services-on-the-mesh-host)'s ordering exists.
+
+### 5.3 The sandbox is handing out broken credentials
+
+```bash
+curl -fsS $API/healthz            # pool.available / pool.issued
+curl -fsS -X POST $API/v1/guest
+docker compose logs --tail 200 services | grep -Ei "pool|sandbox|auth"
+```
+
+Three distinct failures that present the same way to a visitor:
+
+**Pool empty.** 503 with `reason: "pool_exhausted"` and a `Retry-After: 10`. To a
+visitor that reads as a broken product, not a busy one. The usual cause is leases
+not being returned: `SANDBOX_IDLE_TTL_MS` defaults to an hour, so one abandoned
+browser tab holds a credential for an hour. Ten minutes is a better value for a
+public sandbox. Watch `pool.available` on `/healthz`.
+
+**Rate-capped.** 429 with `per_ip_cap`, `global_cap` or `banned`. `banned` is
+deliberately indistinguishable from the others in the response. Default
+`SANDBOX_MAX_PER_IP` is 3, which is too tight for one developer browsing the
+console while running tests from the same address.
+
+**Credentials the broker rejects.** This is the expiry case, and it is the one
+that looks like the mesh is broken. The pool's JWTs carry an `exp`; past it,
+`/v1/guest` hands out credentials the broker refuses, and the sandbox is simply
+dead. Rotation exists to prevent this.
+[R13](#r13-re-mint-the-guest-pool-when-rotation-is-refusing).
+
+The obligations endpoint distinguishes these for you: it reports the pool's dated
+expiry item with one of `rotation is armed and re-mints inside 2 day(s) of this
+date`, `NO rotation key installed (POOL_SIGNING_SEED_FILE unset) — this will
+expire unattended`, `rotation CANNOT run: … missing or empty`, or `EXPIRED —
+/v1/guest is handing out credentials the broker rejects`.
+
+### 5.4 A screen has gone blank
+
+The console is a browser client. Blank means one of four things.
+
+**It refuses to run over plain HTTP.** The console holds an operator session in
+`sessionStorage`, so it refuses to load over a transport that is not `https:` and
+is not loopback, and it says so on the page rather than quietly putting the
+operator password on the wire. If you lost the TLS front, this is what you are
+looking at. Loopback is exempt: tunnel it with `ssh -L 3000:localhost:3000
+<host>` and open http://localhost:3000. The console image also takes
+`ALLOW_INSECURE_HTTP=1`, which overrides the refusal and displays a standing
+warning; use it only on a network you control.
+
+**The operator surface is disarmed or you are unauthorized.** Every
+`/v1/operator/*` route answers 503 when neither the key nor the auth file is
+configured, and 401 when the bearer is missing or wrong.
+
+```bash
+curl -i -H "Authorization: Bearer $MESH_OPERATOR_KEY" $API/v1/operator/whoami
+```
+
+503 with `operator surface not configured` means
+[section 2.1](#21-what-must-exist-before-anything-runs)'s operator files; 401
+means your token. Sessions expire after 12 hours, so "it worked yesterday" is a
+symptom, not a puzzle.
+
+**A specific panel 503s because its dependency is not configured.** These are by
+design, not faults: Fleet needs `FLEET_MANAGER_URL` and its token file; charts
+need `METRICS_DB_URL`; handle release needs `PAN_DELEGATE_SECRET`; the fair-use
+obligation needs `OPERATOR_SEED` *and* that key listed in `ACTIVITY_READER_KEYS`.
+Mesh-wide activity views answer only keys in `ACTIVITY_READER_KEYS` — with that
+list empty, nobody gets them and the traffic screen is legitimately blank.
+
+**CORS refused the origin.** Serving the console from a host that is not in the
+allowed list produces a blank screen and one warning per origin in the services
+log: `[api] CORS: refused origin X (allowed: …; set MESH_CORS_ORIGINS to
+change)`. The default list is the AgentMesh instance's own origins plus localhost,
+so **a self-hosted console is refused until you set `MESH_CORS_ORIGINS`**. The
+effective list is printed at boot.
+
+### 5.5 Mail is not arriving
+
+```bash
+docker compose logs --tail 100 services | grep -i "\[auth\] email"
+```
+
+`[auth] email: Resend API configured` means the key is present. `[auth] email:
+RESEND_API_KEY not set — console mailer` means it is not — and on a build carrying
+the mail guard the process will then refuse to start under `NODE_ENV=production`,
+so seeing that line survive in production tells you your build predates the guard
+or `NODE_ENV` is not `production`.
+
+Then check the four things that produce mail that goes nowhere useful:
+
+- **`API_BASE_URL`** is what sign-in links are built from. Its default is
+  `http://localhost:<port>`, which mails out links nobody else can open. A raw IP
+  address here once leaked into those links.
+- **`MESH_CONSOLE_URL`** is the console address embedded in outbound mail, and it
+  defaults to the AgentMesh hosted console. Set it or your users are sent
+  somewhere that is not yours.
+- **The sending address is hardcoded** to `AgentMesh <noreply@agentmesh.ai>` with
+  no environment override. A provider that verifies sending domains — Resend
+  does — will reject sends from a domain you do not own. This is the wall
+  described in the [decisions](#decisions-to-make-before-you-start): with the
+  published image, self-hosted mail does not work, and no amount of configuration
+  fixes it.
+- **Rate limits.** Sign-in links live 15 minutes and are limited to 5 per email
+  address per 15 minutes.
+
+If you are running a sandbox-only mesh, none of this is a fault: you have no
+sign-in flow to break.
+
+### 5.6 A room is refusing members
+
+```bash
+mesh-adapter diag rooms                          # usage vs quota
+mesh-adapter diag room-check <HANDLE>            # capability grade
+mesh-adapter diag room-check <HANDLE> --acl      # broker-enforced grade
+# and, from the services, tools/rooms-reclaim.mjs list --operator <OPERATOR_EMAIL>  (R16)
+```
+
+`room-check` opens a throwaway `diag-*` room, invites the target, watches the
+join, checks presence, and always tears down (teardown runs in a `finally`). It
+prints five steps — open, invite, join, presence, teardown — and the `detail` says
+which side timed out, because a join miss can be the *target's* fault, its
+supervisor not auto-joining, rather than the mesh's.
+
+The likely causes:
+
+**Quota.** `ROOMS_MAX_PER_OPERATOR` defaults to 10 and is refused at provision
+time. [R16](#r16-reclaim-durable-rooms-when-the-quota-is-full).
+
+**ACL rooms are disabled.** Without `ROOMS_MINT_SEED_FILE` the rooms service
+starts with `acl disabled (no minting key)` and cannot mint per-room member
+credentials at all. Neither bundle here sets it, so ACL rooms are off by default
+on a fresh self-hosted mesh.
+
+**The creator is not an email-verified operator.** Durable and ACL rooms are
+quota-owned, so the creator's key must reverse-resolve to a verified operator
+handle. Plain operator NATS credentials are not a paired handle. On a mesh with no
+mail — see the decisions — this is a standing limitation rather than a fault.
+
+**The member was expelled.** Expulsion is checked before the admit list, and it
+takes effect as refusal of renewal: the credential lapses within its 1-hour TTL. A
+member expelled 30 seconds ago may still be talking.
+
+**Idle expiry.** Durable rooms expire after 3 days idle by default, swept hourly.
+A room that "disappeared" over a long weekend expired.
+
+### 5.7 Services will not start
+
+The boot sequence is fixed: banner, NATS connect, then registry, task manager,
+catalog, activity, rooms, admission, email, API, scheduler. Whatever the last line
+is, the next thing in that list is where it died.
+
+- `Fatal error: NatsError: AUTHORIZATION_VIOLATION` — the credential is wrong,
+  revoked or expired. There is no retry and no fallback to anonymous; the process
+  exits 1 and the supervisor crash-loops.
+- `Fatal error: … ENOENT … services.creds` — path wrong, or unreadable by the
+  user the process runs as. [Trap 4](#51-the-traps-first).
+- `refusing to start with the console mailer` — `NODE_ENV=production` with no mail
+  key, on a build carrying the guard. The published images set
+  `NODE_ENV=production` themselves, so this is the shape of the failure you will
+  see on a newer image with no mail key configured. Either configure mail, or run
+  without `NODE_ENV=production` and accept that sign-in is a development path.
+- `ROOMS_DRIVE_BACKEND=gcs requires ROOMS_GCS_BUCKET` — set the bucket, or use
+  the `nats` or `fs` backend.
+- EACCES on the usage database — `USAGE_DB_PATH` points somewhere unwritable. In
+  Kubernetes this is usually a fresh PersistentVolume mounting root-owned;
+  `fsGroup: 1000` on the pod is the fix, and the manifest here already sets it.
+- `[sched] lease bucket unavailable: …` — JetStream is not answering. This is a
+  warning, not fatal; the scheduler retries every tick, but no scheduled work
+  happens meanwhile.
+
+---
+
+## 6. What is enforced where
+
+An operator making a risk decision needs to know whether a rule is impossible to
+break, merely refused, or only a convention in the platform's own code.
+
+### The broker enforces these. Violating them is impossible, not just wrong.
+
+Node JWT → account JWT → operator JWT is verified at connect, and the node signs a
+server nonce with its NKey. After that the server enforces the node's subject
+permissions and the account's imports and exports **on every operation**.
+
+Subject permissions are enforced at **node** granularity. Per-agent identity is
+asserted in the envelope and verified by signature, not by the transport.
+
+`mesh.peer.{instance}.>` is reserved: no agent, node or service may publish or
+subscribe under it until federation specifies its use
+([SPEC §14.1](https://dev.agentmesh.ai/spec.html)).
+
+Connection-bound registration: `mesh.registry.register.{node_id}` puts the
+publishing credential's own key in the subject, so a credential whose publish
+permission is `mesh.registry.register.<its own key>` cannot register under anyone
+else's identity. A deployment that enforces this grants only the tokenized form
+and omits the untokenized one.
+
+ACL rooms live under `mesh.aclroom.<id>.>`, a namespace ordinary credentials are
+denied, so the broker itself refuses anyone the creator has not admitted even if
+they hold the room descriptor. Member credentials are scoped to exactly
+`mesh.aclroom.<room_id>.>` and `_INBOX.aclroom.<room_id>.>`, with no blanket
+`_INBOX.>` grant.
+
+Scoped signing keys: the key carries a permission template and the broker forces
+every user signed with it into that template regardless of what the JWT asks for.
+Tested against a live broker: a user minted with one was denied `>`,
+`$KV.mesh_operator_sessions.>`, `$JS.API.>`, `mesh.peer.>` and `mesh.aclroom.>`,
+allowed its own inbox and outbox, and denied *another key's* outbox. Server-side,
+not minting-code-side.
+
+Credential expiry. Every short-lived credential — cards 1h, ACL room credentials
+1h, pairing codes 10m, sign-in links 15m — dies on its own. Do not build a screen
+for these.
+
+JetStream limits. The account's `max_storage` is authoritative when set;
+otherwise the server's `jetstream.max_file` binds.
+
+### The platform services enforce these. They refuse; they do not prevent.
+
+Account-tier auth is one gate hoisted into routing for every
+`/v1/accounts/:id/...` path, with an explicit public allowlist that is empty on
+purpose, so a route added under that prefix tomorrow is authorized by default. It
+returns one uniform 401 for "no session", "wrong account" and "no such account",
+so the id is not an enumeration oracle.
+
+Operator-tier auth runs after exactly two exemptions — login and logout — and
+before everything else; unknown paths under the prefix 404 rather than fall
+through. With neither the automation key nor the auth file present, every operator
+route answers 503: a fresh deployment is closed by default, not open.
+
+Every inbound path — inbox, offline drain, events, both room transports, every
+request-reply response — goes through the codec's verifying decode, which requires
+a signature that verifies against `from` before returning anything. There are no
+unverified-decode call sites.
+
+Registration identity: `from` must equal the manifest id; the node attestation
+must bind node to agent, verify, and not be expired; a non-node owner needs its
+own valid unexpired attestation. Sandbox status is clamped against the keys the
+registration *proved* possession of, not the self-asserted node id.
+
+Heartbeat identity comes from the subject token, not the payload, and undecodable
+messages are dropped and only summarized on a timer — a log line per forged
+heartbeat would be the amplifier.
+
+Room membership gates credential minting, and expulsion is checked before the
+admit list.
+
+Reader gating: `mesh.usage.summary` names agents, so the activity service answers
+it only for keys in `ACTIVITY_READER_KEYS`.
+
+Quotas and rate limits: agents per account, rooms per operator, fair-use messages
+and bytes per day, mailbox count, HTTP and per-sender request rates, the 1 MB body
+cap, the login limiter and lockout.
+
+### These are code-enforced conventions. Nothing outside the platform's own code stops a violation.
+
+**The guest pool's permission template.** A scoped signing key cannot carry a
+response permission, and an agent that serves a skill has to be able to answer; so
+pool rotation uses a dedicated *unscoped* signing key and enforces the template in
+code. The guard is real — the job refuses to install a generation whose
+permissions are broader than the one it replaces: a gained allow, a *lost* deny
+(deny wins in NATS, so dropping one widens), a raised `resp`, or a limit that grew
+— but code-enforced is weaker than server-enforced and is worth naming as a known
+gap rather than filing as done. The upgrade path is one sentence: when a scope can
+express a response permission, switch this key to a scoped one and mint with empty
+user permissions.
+
+**Node-to-connection binding.** A subscriber sees the subject, the reply subject,
+the payload and the headers, and nothing about the publisher's authenticated user.
+So `node.id` is a claim, proven by possession of the node key through the
+attestation signature, never by the connection. The only broker-pinnable identity
+is the subject token, which is why the tokenized register subject exists. This is
+a transport gap, and `REGISTRY_REQUIRE_BOUND_REGISTER=1` is the switch that closes
+it — satisfiable only once every credential is minted with the subject template.
+
+**Per-sender rate limits are shaping, not a boundary.** They key on the envelope's
+`from`, which is a freely minted key not bound to any connection. The real backstop
+has to be the transport, the only layer that sees a stable credentialed identity.
+
+**Operator session expiry is decided by code**, not by the KV bucket's `ttl`. A
+bucket that already exists keeps whatever `max_age` it was created with and the
+argument is silently ignored, so the code writes `expires_at` into the value and
+re-checks it on every request.
+
+**`capability`-grade rooms are courtesy.** Membership is possession of the
+descriptor and the substrate enforces nothing: share-link privacy, sufficient
+among cooperating agents. The three grades are worth memorizing because they are
+the clearest example of the whole distinction — `capability` is convention, `acl`
+is broker-enforced, and `sealed` is crypto-enforced, where possession of the key
+*is* membership and the mesh holds only ciphertext.
+
+---
+
+## 7. Limits, and where they are set
+
+Defaults as the code ships them. The env var is the knob; the last column is when
+it is worth turning.
+
+| Limit | Default | Env var | Worth changing when |
+|---|---|---|---|
+| Message size | 1 MB | none (hardcoded) | Matches the NATS default and the advertised `max_message_bytes`. Larger payloads go to the object store as an artifact `ref` (SPEC §18.9). |
+| Agents per account | 10 | `MAX_AGENTS_PER_ACCOUNT` | Refused at mint time. |
+| Apps per account | = agents cap | `MAX_APPS_PER_ACCOUNT` | |
+| Fair use, messages/day | 10,000 | `FAIR_USE_MSGS_PER_DAY` | |
+| Fair use, bytes/day | 15 MB | `FAIR_USE_BYTES_PER_DAY` | |
+| Durable rooms per operator | 10 | `ROOMS_MAX_PER_OPERATOR` | Ten of ten is why a conformance run skips the ACL-room test rather than passing it. |
+| Rooms drive per operator | 100 MB | `ROOMS_DRIVE_BYTES_PER_OPERATOR` | Raise only when the backend can take it — with `ROOMS_DRIVE_BACKEND=nats` this consumes JetStream disk. |
+| Artifact size | 512 KB | `ROOMS_ARTIFACT_MAX_BYTES` | |
+| Room record | 10,000 msgs / 8 MB | `ROOMS_RECORD_MAX_MSGS`, `ROOMS_RECORD_MAX_BYTES` | |
+| Room idle expiry | 3 days, swept hourly | `ROOMS_IDLE_EXPIRY_MS` | |
+| ACL room credential TTL | 1 h | `ROOMS_ACL_CRED_TTL_SEC` | This is also how long an expulsion takes to bite. |
+| Mailbox age | 7 days | `INBOX_BUFFER_MAX_AGE_MS` | |
+| Mailbox size | 25 MB | `INBOX_BUFFER_MAX_BYTES` | |
+| Mailboxes | 500 | `INBOX_BUFFER_MAX_MAILBOXES` | 500 × 25 MB exceeds a 10G disk budget, so **disk binds before the count cap does**. |
+| JetStream disk | the server's `max_file` | `JS_MAX_FILE_BYTES` mirrors it | **Keep the two in step by hand.** If the broker config changes, change the env var, or the obligations screen checks usage against the wrong ceiling. |
+| Sandbox idle TTL | 1 h | `SANDBOX_IDLE_TTL_MS` | Lower it for a public sandbox. An hour lets one abandoned tab hold a credential for an hour. |
+| Sandbox per IP | 3 | `SANDBOX_MAX_PER_IP` | Raise it if developers browse the console while running tests from the same address. |
+| Reaper: always-on TTL | 24 h | `REAPER_TTL_MS` | |
+| Reaper: sandbox TTL | 1 h | `REAPER_SANDBOX_TTL_MS` | |
+| Reaper interval | 10 min | `REAPER_INTERVAL_MS` | Intermittent and on-demand nodes have no TTL; vouch expiry is their only clock. |
+| Presence nodes | 10,000 | `PRESENCE_MAX_NODES` | Evicts the 10% stalest with a warning. |
+| Presence staleness | 60 s | none | Two missed 30-second heartbeats. |
+| HTTP rate limit | 30 / min / IP | `RATE_LIMIT_HTTP_MAX`, `..._WINDOW_MS` | |
+| Link rate limit | 5 / 15 min / email | `RATE_LIMIT_LINK_MAX`, `..._WINDOW_MS` | |
+| Per-sender NATS rate | 60 / min | `RATE_LIMIT_NATS_MAX`, `..._WINDOW_MS` | Shaping, not a boundary. [Section 6](#6-what-is-enforced-where). |
+| Operator login | 5 / 15 min / IP, 20 global failures | `MESH_OPERATOR_LOCKOUT_FAILURES` | |
+| Operator session | 12 h | none | |
+| Account session | 30 days | none | |
+| Sign-in link | 15 min | none | |
+| Pairing / link code | 10 min, single use | none | |
+| Bootstrap token | 7 days, single use | none | |
+| Pool credential TTL | 30 days | `POOL_CRED_TTL_DAYS` | |
+| Pool renew window | 2 days before expiry | `POOL_RENEW_WITHIN_DAYS` | |
+| Pool generations kept | 3, in `_prev/<stamp>/` | `POOL_KEEP_GENERATIONS` | |
+| Secret age warning | 90 days (critical at 180) | `OBLIGATIONS_SECRET_WARN_DAYS` | Path-configured secrets only. |
+| Inbox backlog warning | 50 per mailbox (critical at 4×) | `OBLIGATIONS_INBOX_BACKLOG` | |
+| Capacity warn / critical | 75% / 90% | none | |
+
+Registrar limits, if you run one: verification codes 5/hour per anchor
+(hardcoded), 15/hour per IP (`PAN_CODES_MAX_PER_IP_HOUR`), 500/hour globally
+(`PAN_CODES_MAX_PER_HOUR`); pairing 60/hour per IP; reverse resolution 300/hour
+per IP; re-home 60/hour; invites 25/day per anchor and 50/day per IP; card TTL
+3600s clamped to 60..86400 (`PAN_CARD_TTL_SECS`).
+
+---
+
+## 8. Where this handbook is uncertain
+
+Everything below could not be verified for a deployment that is not the hosted
+one. Check your own host or cloud console before acting on any of it.
+
+**Whether the image you pulled refuses to start without mail.** The startup guard
+that refuses the console mailer under `NODE_ENV=production` landed in the services
+source *after* the `0.2.0` images were published, and the images set
+`NODE_ENV=production` themselves. So `0.2.0` starts fine with no mail key, and a
+later image will not. Read your boot log for the `[auth] email:` line rather than
+trusting either statement.
+
+**Self-hosted mail is not verified to work at all.** The sending address is
+hardcoded to a domain you do not own, and no code path overrides it. This is
+stated as a limitation rather than a workaround because no workaround was
+verified.
+
+**Broker monitoring depends on which shape you chose.** The Kubernetes manifest
+sets `http: 8222` and probes `/varz`; the Compose bootstrap config sets no
+monitoring port and Compose publishes none. So on Compose and on a VM built from
+`bootstrap.sh`, `/varz` and `/healthz` on 8222 do not answer. Enabling them means
+editing the broker config, a broker restart, and possibly a firewall change. Use
+`$API/healthz` for remote broker liveness instead.
+
+**JetStream state is unbacked in both bundles.** No snapshot schedule, no `nats
+stream backup`, nothing in cron. Compose puts it on its own volume and Kubernetes
+gives each replica a PVC, which protects against a container being replaced, not
+against the data being wrong. If JetStream state matters to you, backing it up is
+work you have to do; nothing here does it. The only backup either bundle argues
+for is the operator keystore, and that is manual-on-change.
+
+**Revocation and the spec pull against each other.**
+[SPEC §4.8](https://dev.agentmesh.ai/spec.html) says node revocation MUST be
+achievable without restarting the mesh servers. A memory resolver cannot deliver
+that: the account JWT is text in the config, so the broker has to be restarted to
+re-read it. Both bundles here use a memory resolver, so both have this gap. A
+directory or URL resolver is the path out of it, and neither bundle configures
+one. Worth naming as a known gap rather than picking a side.
+
+**No script ships broker configuration to a running broker.** In Compose the
+config is generated once and then yours; in Kubernetes it is a ConfigMap and a
+Secret you edit. Broker config changes, including the account-JWT step of a
+revocation ([R12](#r12-revoke-a-credential-and-why-that-is-not-rotation)), are
+manual either way.
+
+**"Restart-only, no reload" is inference, not documentation.** It follows from a
+systemd unit with no `ExecReload`. If you write your own unit, you decide this.
+
+**Registrar deployment, and its database.** No registrar image is published, so
+[R8](#r8-deploy-the-registrar) describes properties rather than a procedure, and
+nothing here can tell you how a registrar you build should be configured. With
+`DATABASE_URL` unset it starts an embedded Postgres, which is a rig-only path.
+
+**Manual guest-pool minting is not scripted.** The Compose bootstrap's guest loop
+shows the shape but not the permission set the rotation job installs, and the
+permission set is the whole safety property.
+[R13](#r13-re-mint-the-guest-pool-when-rotation-is-refusing) explains what to do
+instead.
+
+**The adapter install step on a host running several agents is not scripted
+here.** Nothing in this bundle installs or pins an adapter version on a node.
+
+**Roster re-signing beyond the CLI is not available publicly.** The tool that
+re-signs an edited `admission.json` is part of the unpublished fleet manager, so
+[R14](#r14-change-an-admission-roster) can only offer the CLI path for anything
+the CLI exposes.
+
+**The `nats` CLI's context and credentials on your host.** The `nats kv` commands
+in R13 need a context or explicit credentials, and no file here sets one up.
+Confirm the bucket's contents before deleting from it.
+
+**Where the conformance suite is published.** It is not in this repository, and
+this handbook cannot verify what is available where.
+[SECURITY.md](../SECURITY.md) points at a separate protocol repository for
+specification and conformance reports, which is the place to look.
+
+**TLS, ingress and certificates are entirely yours.** Neither bundle ships an
+ingress object, a certificate issuer, or a reverse-proxy config, and no runbook
+here renews a certificate. Whatever you put in front is outside everything
+described above — which also means nothing in the obligations surface watches it.
+Do not read the absence of a certificate panel as the absence of a duty.
+
+**Version pins drift across documents.** This repository's Compose README names
+one adapter version in its example, `mesh-adapter-latest.txt` in the release
+bucket moves independently, and `0.2.0` is the only published services and console
+version at the time of writing. Trust the release pointer for the adapter and your
+own pinned tag for the images; treat every version written into prose, including
+in this file, as a snapshot.

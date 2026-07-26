@@ -29,6 +29,18 @@ browser; the Kubernetes manifests were applied to a GKE Autopilot cluster and
 taken through the same check. The gotchas each README lists are things that
 actually happened during those runs.
 
+## Once it is running
+
+[docs/operator-handbook.md](docs/operator-handbook.md) —
+<https://github.com/jeffrschneider/agentmesh-deploy/blob/main/docs/operator-handbook.md>
+
+The handbook for keeping a mesh alive and fixing it at 3am: the decisions to make
+before you start, seventeen runbooks, diagnosis organised by symptom rather than by
+task, every limit and the variable that changes it, and an explicit list of what it
+could not verify. Read its "decisions to make before you start" section before you
+commit to a shape — one of those decisions, where the operator keystore backup
+lives, has no undo.
+
 ## What you are deploying
 
 | | |
@@ -63,6 +75,8 @@ before you have agents depending on it.
 
 ## Reference
 
+- Operator handbook: [docs/operator-handbook.md](docs/operator-handbook.md) —
+  <https://github.com/jeffrschneider/agentmesh-deploy/blob/main/docs/operator-handbook.md>
 - Protocol specification: <https://dev.agentmesh.ai/spec.html>
 - Naming specification: <https://dev.agentmesh.ai/naming-spec.html>
 - Running a mesh: <https://dev.agentmesh.ai/running-a-mesh.html>
