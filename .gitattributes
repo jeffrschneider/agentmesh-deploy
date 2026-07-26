@@ -1,0 +1,12 @@
+# Shell scripts here run inside Linux containers. A CRLF checkout gives them a
+# carriage return on the shebang line, and the kernel then looks for an
+# interpreter literally named "/usr/bin/env bash\r" and reports "bad interpreter:
+# no such file or directory" -- an error that names a file which plainly exists,
+# which is why it costs an afternoon rather than a minute.
+#
+# Git on Windows converts by default, so without this a clone, an edit and a
+# commit is enough to break bootstrap.sh for everyone. Pin them.
+*.sh text eol=lf
+
+# The Compose bundle's env template is read by the same shell.
+*.env.example text eol=lf
