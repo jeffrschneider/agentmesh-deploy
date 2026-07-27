@@ -14,6 +14,8 @@ nsc -H ./.nsc add user -a agents -n services
 nsc -H ./.nsc generate creds -a agents -n services > creds/services.creds
 nsc -H ./.nsc add user -a agents -n node-1
 nsc -H ./.nsc generate creds -a agents -n node-1 > creds/node-1.creds
+nsc -H ./.nsc add user -a agents -n bridge
+nsc -H ./.nsc generate creds -a agents -n bridge > creds/bridge.creds
 for i in 1 2 3; do
   nsc -H ./.nsc add user -a agents -n guest-$i
   nsc -H ./.nsc generate creds -a agents -n guest-$i > creds/pool/guest-$i.creds
@@ -28,8 +30,21 @@ kubectl create namespace agentmesh
 kubectl -n agentmesh create secret generic mesh-config    --from-file=accounts.conf=./accounts.conf
 kubectl -n agentmesh create secret generic services-creds --from-file=services.creds=./creds/services.creds
 kubectl -n agentmesh create secret generic sandbox-pool   --from-file=./creds/pool/
+kubectl -n agentmesh create secret generic bridge-creds   --from-file=bridge.creds=./creds/bridge.creds
+kubectl -n agentmesh create secret generic bridge-api-keys --from-literal=api-keys="$(openssl rand -hex 24)=validation"
 kubectl -n agentmesh apply -f mesh.yaml
 kubectl -n agentmesh logs deploy/services | grep -A6 "OPERATOR CONSOLE LOGIN"
+```
+
+The last two are the A2A bridge's, and both are marked optional in the manifest
+so that a missing one leaves a diagnosable pod rather than a stuck one. Without
+`bridge-creds` the bridge cannot reach the mesh; without `bridge-api-keys` it
+reaches the mesh and refuses every inbound A2A call with 401, which is its
+shipped default and says so in its own log. Read the key back out when you need
+it:
+
+```
+kubectl -n agentmesh get secret bridge-api-keys -o jsonpath='{.data.api-keys}' | base64 -d
 ```
 
 To look at it without an ingress:
@@ -38,7 +53,80 @@ To look at it without an ingress:
 kubectl -n agentmesh port-forward svc/console 8080:8080 &
 kubectl -n agentmesh port-forward svc/services 3001:3001 &
 kubectl -n agentmesh port-forward svc/nats-client 4443:4443 &
+kubectl -n agentmesh port-forward svc/bridge 8090:8090 &
 ```
+
+## The A2A bridge and the eval agent
+
+Two more Deployments at the bottom of the manifest, both optional and neither
+depended on by anything else: delete them and the mesh is unaffected.
+
+**Both images have Dockerfiles and both are built by the AgentMesh release
+workflow, but neither has been pushed yet.** All four AgentMesh images publish
+together at `0.2.1` the first time a release is cut; `agentmesh-services` and
+`agentmesh-console` are on ghcr at `0.2.0` today and these two have never been
+pushed at all. `0.2.1` rather than `0.2.0` because the workflow builds all four
+from current `main` at whatever version it is given, so publishing the new pair
+at `0.2.0` would re-push the other two at `0.2.0` as well and replace published
+images with substantially different content under a version that already means
+something else. To apply this manifest before that release, build both from the
+AgentMesh repository **root** — `docker build -f eval-agent/Dockerfile -t
+<your-registry>/agentmesh-eval-agent:0.2.1 .` and the same shape for
+`bridge-a2a/Dockerfile` — push to a registry the cluster can pull from, and
+change the two `image:` lines.
+
+**A package's first publish lands private, and a private package is
+indistinguishable from a missing one.** A GitHub container registry package
+stays private until someone makes it public once, by hand, in that package's
+settings; until then an anonymous pull fails with a denied error and the pod
+sits in `ImagePullBackOff` looking exactly like a tag that was never published.
+Whoever cuts the first `0.2.1` release flips both new packages to public
+afterwards. If you deliberately keep a package private, the cluster needs an
+`imagePullSecret` on the pod spec, which this manifest does not set.
+
+Three things about this pair that are specific to Kubernetes:
+
+**`TRUSTED_PROXIES` behind an ingress must be the ingress pod CIDR, never
+`loopback`.** The bridge believes `X-Forwarded-For` only from addresses on that
+list, and the peer it sees is the ingress controller's *pod*, which is never
+127.0.0.1 from inside the bridge's container. Leave it empty or set it to
+`loopback` and the header is ignored for every request, so every caller on the
+internet is identified as the ingress pod: one mesh identity and one shared rate
+bucket for all of them. Nothing logs that this happened; it looks exactly like a
+working bridge with one very busy client.
+
+**Attachment happens once, at startup, and nothing retries it.** Kubernetes has
+no `depends_on`, so a bridge scheduled before the eval agent or before the
+services tier logs `failed to attach` and then runs indefinitely without the
+eval agent on the mesh, passing its own readiness probe the whole time. The fix
+is `kubectl -n agentmesh rollout restart deploy/bridge`, and the symptom is the
+eval agent missing from discovery while both pods read as Ready.
+
+**The bridge is pinned at one replica.** Each replica is its own mesh node and
+runs `ATTACH` independently, so two replicas register two copies of the eval
+agent under two different ids, and discovery returns two agents where there is
+one service. The eval agent itself scales freely; note only that its rate limiter
+is per-pod, so N replicas serve N times the cap.
+
+And two that are not specific to Kubernetes but will bite here first, because
+this manifest already sets two variables to `""` and makes that look like the
+house style:
+
+**An empty string is a value, not an absence.** The bridge reads `MESH_URL`,
+`PORT` and `PUBLIC_BASE_URL` with `??`, so `value: ""` on any of those three
+replaces the code default rather than leaving it in place. `PORT: ""` becomes
+`Number("") = 0`, and the bridge binds whatever port the kernel hands out while
+the Service and the readiness probe both point at 8090 — a pod that never goes
+ready, for a reason nothing logs. The manifest gives all three real values;
+`ALLOW_ANONYMOUS` and `TRUSTED_PROXIES` are the ones that may safely be empty,
+because every variable other than those three is read with a truthy test.
+
+**`tsx` is a runtime dependency of the bridge image.** The bridge is not
+compiled — it runs `node --import tsx src/main.ts`, because it imports the SDK
+by relative source path — yet `tsx` is declared in `devDependencies`. If you
+adapt `bridge-a2a/Dockerfile`, an `npm ci --omit=dev` on its own gives you an
+image that builds green and then exits on its first line with `Cannot find
+package 'tsx'`, which in a cluster reads as an unexplained `CrashLoopBackOff`.
 
 ## Three objects, three scaling rules, and only one of them is elastic
 
@@ -148,3 +236,14 @@ joined over a port-forward and registered, and the operator console was signed
 into in a browser and showed the agent, with no requests to any public AgentMesh
 endpoint. The four failures above are all things that happened during that run
 rather than things anticipated on paper. The cluster was deleted afterwards.
+
+**That run predates the `bridge` and `eval-agent` Deployments and does not cover
+them.** Both images now exist and have been run as containers — the eval agent
+answers a real A2A call with the exact value the verification step expects, and
+the bridge binds its port and reports `ready:false` from `/healthz` before its
+mesh connection is up, which is what proves `tsx` and the SDK source resolved
+inside the image — and the release workflow repeats both checks on every build.
+The bridge's attach path has separately been shown to accept the eval agent's
+card and forward a real call over HTTP. What has never happened is either object
+applied to a cluster, or the bridge's mesh leg carrying a request. Treat the A2A
+objects as unverified on Kubernetes.

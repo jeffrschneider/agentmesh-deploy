@@ -24,11 +24,20 @@ pointer you can open. The claim has a source; you cannot read it. What you *can*
 read is either in this repository, at <https://dev.agentmesh.ai>, or in the NATS
 documentation, and the text says which.
 
+One question is common enough to route directly rather than leave you to assemble
+it. If you arrived asking how to get better uptime than a single machine, and in
+what order to do it, that has its own section:
+[how to get higher uptime, in order](#how-to-get-higher-uptime-in-order). It sits
+early, ahead of the shapes and the sizing, because the order matters more than any
+single step in it and two of the steps are actively wrong to take first. It is a
+sequence, not a menu, and it points down into the detail rather than restating it.
+
 ---
 
 ## Table of contents
 
 - [1. Decisions before you start](#1-decisions-before-you-start): the forks, ordered by what they cost to undo
+- [How to get higher uptime, in order](#how-to-get-higher-uptime-in-order): seven steps, in the order they unlock each other, and what each one does not buy
 - [2. Infrastructure shapes](#2-infrastructure-shapes): one node, one region, and the one we have not tried
 - [3. Sizing, and what binds first](#3-sizing-and-what-binds-first): the numbers, the arithmetic, and the file each one lives in
 - [4. High availability, honestly](#4-high-availability-honestly): what clustering buys today, and the two hard limits it does not fix
@@ -216,6 +225,319 @@ available, not as requirements.
 
 ---
 
+## How to get higher uptime, in order
+
+Everything in section 1 is a decision. This is a sequence, and it answers the
+question most operators actually arrive with: *I am on one machine and I want
+better uptime than that, so what do I do, and in what order?*
+
+Seven steps. The order is not a preference. Steps 2 and 3 are what make step 4
+possible at all; step 4 is how you prove them before spending money; step 5 is
+worse than doing nothing if you buy one machine instead of two; step 6 quietly
+does nothing unless you also do the second half of it; and step 7 is the only one
+that removes the single point of failure. Read the whole list before you start the
+first item.
+
+Two things to hold on to while you read it. **The broker and the services are
+separate ladders.** Steps 1, 5 and 6 improve the broker and the data underneath
+it, and leave the single services instance exactly as it was; only steps 2, 3, 4
+and 7 go anywhere near that. An operator who does 1, 5 and 6 and stops has a
+redundant transport in front of a control plane that still dies with one machine.
+And **three of the seven are changes to the services build rather than settings
+you can turn on.** They are in the list because you cannot plan the sequence
+without knowing where it stops today, not because there is a variable waiting for
+you. [Section 4.2](#42-the-first-limit-every-stream-and-kv-bucket-is-single-replica)
+declines to put a date on that work and this section does the same.
+
+| # | Step | What it costs | Whose work |
+|---|---|---|---|
+| 1 | Lame duck mode on the broker you already have | Nothing to buy | Yours, today |
+| 2 | A queue group on every service subscription | Nothing to buy | The services build |
+| 3 | The usage counters off local disk | Nothing to buy | The services build |
+| 4 | A second services instance on the same machine | Nothing to buy, and it buys proof rather than availability | Yours, after 2 and 3 |
+| 5 | Two more machines, one three-node broker cluster | **Two machines** | Yours, today |
+| 6 | Three replicas, then a migration pass over every asset that already exists | Nothing beyond step 5 | The build sets the count; the migration is yours |
+| 7 | The second services instance onto a different machine | Nothing beyond step 5 | Yours, after 2 and 3 |
+
+The detail behind every step is already in sections 2, 4 and 5. What follows is
+the order, what each step buys, and what it does not.
+
+### Step 1. Lame duck mode on the broker you already have
+
+Free, and yours today. A NATS server told to retire gracefully stops accepting new
+connections, holds the ones it has for a grace period, then closes them spread
+across the rest of a window before it exits. On a VM that is three lines of broker
+config and two lines of unit:
+
+```conf
+# nats.conf
+pid_file: "/var/lib/nats/nats.pid"
+lame_duck_duration: "45s"
+lame_duck_grace_period: "10s"
+```
+
+```ini
+# the systemd unit, alongside the ExecStart you already have
+ExecStop=/usr/local/bin/nats-server --signal ldm=/var/lib/nats/nats.pid
+TimeoutStopSec=75
+```
+
+Those are the same three config keys, and the same two durations, that the
+Kubernetes manifest in this repository sets
+([`kubernetes/mesh.yaml`](../kubernetes/mesh.yaml)), and
+[section 5.1](#51-lame-duck-mode-which-is-the-primitive-for-upgrading-a-cluster)
+has the arithmetic tying the numbers together plus the two places the NATS
+documentation reads the wrong way round. **The only thing that differs on a VM is
+what triggers the drain**: Kubernetes triggers it from a `preStop` hook and a VM
+triggers it from `ExecStop`. Nothing about the mechanism is Kubernetes-only, and
+reading section 5.1's table as a Kubernetes feature is the mistake this step
+exists to correct.
+
+Four things about those five lines.
+
+**`pid_file` is what makes the pidfile form of the signal work at all.** Without
+it nothing writes a pidfile, `--signal ldm=<path>` has no pid to read, and the
+drain silently does not happen. Both spellings of the setting are valid and so is
+`-P` on the command line
+(<https://docs.nats.io/running-a-nats-service/configuration>), and the pidfile form
+of the signal is documented at
+<https://docs.nats.io/running-a-nats-service/nats_admin/signals>. Let the server
+write the file rather than a wrapper script: the server writes the number with no
+trailing newline and the signal path parses the file's bytes as an integer, so a
+pidfile that ends in a newline fails. The path here is not the manifest's
+`/var/run/nats/nats.pid`, deliberately. In a pod that directory is an `emptyDir`;
+on a VM `/run` is a tmpfs that is empty at every boot, so either have systemd
+create the directory for you or put the pidfile somewhere that already exists,
+such as beside the JetStream store.
+
+**`TimeoutStopSec` is the line people leave out**, and it is the same arithmetic
+as `terminationGracePeriodSeconds` on Kubernetes: 45 seconds of drain plus 30 of
+margin is where the manifest's 75 comes from. systemd runs `ExecStop`, then sends
+its kill signal to whatever is still running, then escalates to SIGKILL when the
+stop timeout expires, so the drain has to finish inside that timeout. Set both
+numbers rather than inheriting either, because NATS's own default drain is 2
+minutes and systemd's default stop timeout is commonly 90 seconds, which puts
+SIGKILL half a minute ahead of the end of the drain.
+
+**The SIGTERM in the middle of that is harmless, and the whole step rests on it.**
+Once the server is already in lame duck it ignores SIGTERM, which is how the
+`nats-server` source reads and what section 5.1 records as verified against a real
+binary on Linux. The drain therefore runs on its own schedule and the stop timeout
+is the only real deadline. **SIGINT is not harmless**: it shuts the server down
+whether or not a drain is in progress, so `nats-server --signal quit`, Ctrl-C, and
+a unit that sets `KillSignal=SIGINT` all abort one and drop whatever is left.
+
+**What this step buys, which is less than it sounds.** On a single broker it does
+not save your connections. There is no peer to hand them to, so every client still
+drops. What changes is that they close on a schedule instead of all at once, and
+that the mechanism is configured and exercised before the day it matters. It also
+makes a restart *longer*: the floor on `lame_duck_duration` is 30 seconds
+(<https://docs.nats.io/running-a-nats-service/configuration>) and the block above
+asks for 45, so `systemctl restart nats` goes from about a second of outage to
+most of a minute of one, and 30 seconds is as short as you are allowed to make
+that. Take the trade anyway, because step 5 is where it pays: three
+brokers with this configuration is failover, and three brokers without it is three
+separate outages. If a half-minute restart is genuinely worse for you than an
+abrupt one, put the configuration in now and add `ExecStop` when the peers arrive.
+Either way, losing the machine is still a total outage. Nothing in step 1 changes
+that.
+
+### Step 2. A queue group on every service subscription
+
+Nothing to buy, and nothing you can configure: this is a change to the services
+build. Core NATS delivers a published message to every matching subscriber, so two
+services instances each receive every request and each answer it. The requester
+takes the first reply and discards the rest, which makes the duplication invisible
+from outside while every request is served twice: counted twice, rate-limited
+twice, and for anything with a side effect, applied twice.
+[Section 4.3](#43-the-second-limit-the-services-tier-cannot-go-past-one-replica)
+lists the subscriptions involved and explains why the shared request-reply helper
+in the published `0.2.0` image cannot be handed a queue name even by accident.
+
+What this buys on its own is nothing: no availability, no throughput. It removes
+an impossibility. It has to land before step 4 rather than after it, because a
+second instance started without it is not slower or less tidy, it is incorrect.
+
+### Step 3. The usage counters off local disk
+
+Also a change to the services build, also nothing to buy. The activity service
+keeps per-agent usage counters in a SQLite file on local disk at `USAGE_DB_PATH`.
+Two instances keep two divergent sets and neither is right, and because whether an
+agent is over fair use is a judgement a human makes from those counters
+([section 3](operator-handbook.md#3-what-you-owe-it)), the divergence is not
+cosmetic: it is an operator deciding from a number that is wrong by an unknown
+amount. No configuration moves them. The one Postgres connection the services take,
+`METRICS_DB_URL`, is the history recorder and holds no usage counters at all.
+
+The smaller half of the same problem needs no code change. The operator console's
+login is a scrypt hash in a JSON file at `MESH_OPERATOR_AUTH_FILE`, and because
+that is a static file rather than a live database, two instances can be given the
+same one. Two instances on one machine read one file, so it is a non-issue at step
+4; two instances on two machines need the file placed on both, which is step 7's
+problem. An instance without it answers 503 on every operator route
+([section 4.3](#43-the-second-limit-the-services-tier-cannot-go-past-one-replica),
+[R9](operator-handbook.md#r9-set-or-change-the-operator-console-login)).
+
+### Step 4. A second services instance on the machine you already have
+
+Free, and the point of it is proof rather than availability: two instances in one
+failure domain survive nothing. What it tests is that steps 2 and 3 actually
+worked, that one request produces one reply and one set of counters, while there
+is still only one host to look at. A duplicate-reply bug found on one machine is a
+bug; the same bug found across three machines is a network mystery.
+
+It is not simply a replica count. On Kubernetes the services Deployment ships
+`replicas: 1` with `strategy: Recreate` and a ReadWriteOnce volume precisely so
+that two instances cannot coexist, and
+[section 5.3](#53-upgrading-the-services-and-the-console) describes both failure
+branches you get by relaxing that, one of which looks like a perfectly normal
+deploy. On a VM it is a second process on a second port with something in front of
+the pair.
+
+### Step 5. Two more machines, and a three-node broker cluster
+
+The first step that costs hardware, and the one people get wrong by buying a
+second machine rather than a third.
+
+**Three, not two, and two is worse than one.** JetStream replication is Raft, and
+a Raft group needs a majority, which NATS defines as half the cluster size plus
+one. For a cluster of three that is two, so one node can be lost and the rest
+carry on storing new messages. For a cluster of two it is also two, so losing
+either node leaves the survivor unable to form a quorum and JetStream stops
+accepting writes. You would have bought a second machine that can fail, doubled
+the surface that has to stay up, and got no fault tolerance in exchange. Quorum is
+defined at
+<https://docs.nats.io/running-a-nats-service/configuration/clustering/jetstream_clustering>,
+which also recommends three or five servers; the NATS documentation is blunt about
+the equivalent replica count, calling two replicas "no significant benefit at this
+time" and recommending three instead
+(<https://docs.nats.io/nats-concepts/jetstream>).
+[Section 2.2](#22-clustered-within-one-region) says the same thing about the
+broker's node count and adds the ordering rules for scaling back in, and the
+reason an autoscaler must never point at it.
+
+Two details decide whether the cluster is worth what you paid for it.
+
+**Step 1's configuration goes on all three, not only the one you set it up on.** A
+broker restarted without it drops its clients abruptly. They do reconnect to a
+peer, so it is survivable, but the reason to run three brokers is that they can be
+restarted one at a time without an application noticing, and that only happens
+where the drain is configured. Restart one at a time and wait for each to rejoin
+([R4](operator-handbook.md#r4-restart-the-broker)): with quorum at two, restarting
+two together takes the cluster below it.
+
+**Give clients more than one address, but for the right reason.** A NATS client
+that reaches one member of a cluster is told about the others in that server's
+INFO and adds them to its own list, so failover to a surviving peer happens
+without your configuring it
+(<https://docs.nats.io/using-nats/developing-with-nats/connecting/cluster>). What a
+single configured address does not survive is a **cold start**: a process that
+boots while the one node you named is down has nothing to try and never receives
+the list. So configure more than one seed, and understand that you are buying
+restart and deploy resilience rather than failover. Three mechanics to get right on
+a VM, none of which apply on Kubernetes because there the manifest points
+everything at a Service that already spreads across the pods. The SDK's `connect`
+takes either one URL or a list, so agents can be given all three. The services take
+a single `NATS_URL`, and the NATS JavaScript client wraps a string into a
+one-element server list rather than splitting it, so a comma-separated value
+becomes one unusable hostname; what does work there is a single DNS name with a
+record per broker, because that client resolves a hostname to every address it has
+and treats each as a candidate. And check that nothing sets `no_advertise`, which
+switches the INFO list off entirely
+(<https://docs.nats.io/running-a-nats-service/configuration/clustering/cluster_config>),
+and that each broker advertises an address your clients can actually reach.
+
+**What step 5 buys**: a broker node can be lost, drained or restarted without the
+transport going away. **What it does not buy**: anything about your data, which is
+step 6, or anything about the services tier, which is step 7. Lose a machine at
+this point and you still lose whatever JetStream data lived on it
+([section 4.2](#42-the-first-limit-every-stream-and-kv-bucket-is-single-replica)).
+
+### Step 6. Three replicas, and then a migration pass over everything that already exists
+
+The second half is the one that gets skipped, and skipping it means the cluster you
+just paid for protects nothing that was already there.
+
+Every JetStream stream and KV bucket the platform creates is created with one
+replica on the published image, on every shape including the three-node cluster;
+[section 4.2](#42-the-first-limit-every-stream-and-kv-bucket-is-single-replica)
+names the mechanism and counts them. So step 5 on its own gives you connection
+failover over data that still lives on exactly one of your three machines. Setting
+the count is a change to the services build, and the published `0.2.0` image has
+no setting for it. That is the known gap section 4.2 declines to date.
+
+The half that is yours, whenever there is a count to set: **a raised replica count
+applies only to assets created after you raise it.** The JavaScript client looks a
+bucket up before creating it and returns the existing one without comparing the
+configuration you passed, so asking for three replicas of a bucket created with
+one succeeds, changes nothing, and reports nothing. It is a language-specific trap:
+the Go client raises an error on the same call. Raising the count on something that
+already exists is an edit rather than a recreate, supported since NATS 2.2 and
+listed as editable at <https://docs.nats.io/nats-concepts/jetstream/streams>, but
+it has to be done per asset:
+
+```bash
+nats stream update KV_mesh_registry --replicas=3
+```
+
+Once per KV bucket, whose backing stream is named `KV_<bucket>`, plus once per
+agent mailbox stream and once per durable room record stream. `nats stream ls`
+against your own broker is the authoritative list of what needs the pass, and it
+is the only list that reflects how many agents have registered and how many
+durable rooms exist on your mesh. So this is a pass proportional to the size of
+your mesh rather than a flag, it moves data between
+machines while it runs, and going from one replica to three specifically has a
+known rough edge in the NATS issue tracker
+(<https://github.com/nats-io/nats-server/issues/6838>). Do it deliberately, with
+the mesh quiet, and not during an incident.
+
+**What step 6 buys**: losing a machine stops losing the data that was on it.
+**What it does not buy**: anything at all in the services tier.
+
+### Step 7. The second services instance onto a different machine
+
+This is the step that removes the single point of failure. Everything before it
+improves the broker and the data underneath it and leaves this untouched. With one
+services instance, everything that needs a platform service to answer stops while
+that instance is down: discovery, task creation and updates, room operations,
+admission, the HTTP API, the operator surface, the guest sandbox. Traffic that is
+purely between two agents keeps flowing, because the broker carries it and no
+service sits in that path
+([section 4.3](#43-the-second-limit-the-services-tier-cannot-go-past-one-replica)).
+So until step 7 you have a control plane with one machine's availability sitting
+behind a transport with three machines' availability, and it is the control plane
+that decides whether an agent can be found in the first place.
+
+Beyond steps 2, 3 and 4, it needs two things. The console login file has to be
+present on both hosts (step 3). And something has to sit in front of the two HTTP
+endpoints, because `<API_BASE>` is one address and there are now two processes
+answering to it; the TLS terminator you already needed for `<API_BASE>` and
+`<MESH_WS>` ([1.3](#13-the-five-that-deserve-more-than-a-row)) is the natural
+place for that.
+
+With all seven done, losing any one machine is survivable: the brokers keep
+quorum, the data has copies, and a services instance answers. Be precise about
+what that still is not. It is not zero downtime through an upgrade, because the
+services have no rolling path
+([section 5.3](#53-upgrading-the-services-and-the-console)). It is not a backup:
+neither bundle backs JetStream up, so losing all three machines, or corrupting the
+data on them, is a failure this sequence does nothing about
+([section 8](operator-handbook.md#8-where-this-handbook-is-uncertain)). And it is
+not survival of a region ([section 2.3](#23-more-than-one-region)).
+
+### Where the sequence stops today
+
+Steps 1 and 5 are yours right now, and step 6's migration pass is yours the moment
+there is a count to raise. Steps 2, 3, 4 and 7 wait on the services build, which
+means the single point of failure named in section 4.3 is still there for every
+operator, including us. If you need better than that today, the four levers in
+[4.4](#44-what-high-availability-looks-like-today-in-one-paragraph) are worth more
+in practice than any hardware in this list: a rebuild you have rehearsed,
+JetStream backups you arrange yourself, a pinned image version so the rebuild is
+deterministic, and a keystore backup you have actually restored once.
+
+---
+
 ## 2. Infrastructure shapes
 
 Three, and we have operational experience of one of them.
@@ -244,7 +566,10 @@ offline mail are lost with it; agents can re-register, but the mesh's memory doe
 not come back on its own
 ([section 8](operator-handbook.md#8-where-this-handbook-is-uncertain)). If
 JetStream state matters to you, arranging backups is work you have to do, and it
-is worth deciding that now rather than after the first incident.
+is worth deciding that now rather than after the first incident. If your reason
+for reading this subsection is to get past that single failure domain, the ordered
+answer is [how to get higher uptime, in order](#how-to-get-higher-uptime-in-order),
+and its first step is free and applies to the machine you already have.
 
 For a starting size, the Kubernetes manifest in this repository is the only place
 the resource shapes are written down, and they are the same processes:
@@ -300,7 +625,11 @@ surviving server. **What it does not buy you today is data redundancy or a
 redundant services tier**, and both of those are hard current limits rather than
 tuning gaps. Read [section 4](#4-high-availability-honestly) before you choose
 this shape for an availability requirement, because the thing most people expect
-clustering to give them is the thing it does not currently give them.
+clustering to give them is the thing it does not currently give them. This shape is
+step 5 of [how to get higher uptime, in order](#how-to-get-higher-uptime-in-order),
+which is worth reading before you provision it: two of the things that decide
+whether it is worth the money are not in this subsection, and one step that costs
+nothing belongs before it.
 
 Two costs worth planning for. Each replica gets its own persistent volume, so
 disk is multiplied by the replica count even though application data is not
@@ -510,7 +839,10 @@ room both land in JetStream when `ROOMS_DRIVE_BACKEND` is left at `nats`.
 ## 4. High availability, honestly
 
 This is the section most likely to mislead, so it is written to be read against
-the manifest rather than instead of it.
+the manifest rather than instead of it. It is also the wrong section to arrive at
+first: it says what to expect, not what to do. The ordered answer to what to do is
+[how to get higher uptime, in order](#how-to-get-higher-uptime-in-order), and the
+two limits below are what steps 6 and 7 of it exist to address.
 
 ### 4.1 What the shipped cluster actually gives you
 
@@ -644,7 +976,10 @@ image version so a rebuild is deterministic
 keystore backup so the mesh's identity is never the thing you are missing
 ([R11](operator-handbook.md#r11-restore-the-nsc-keystore)). Those four are worth
 more in practice than a third broker replica, given what the third replica does
-and does not currently protect.
+and does not currently protect. If you want to spend on infrastructure anyway, do
+it in the order in
+[how to get higher uptime, in order](#how-to-get-higher-uptime-in-order), which
+places each of the two limits above at the step that removes it.
 
 ---
 
@@ -702,6 +1037,15 @@ entirely in the clustered shape, which is why the Compose bundle does not config
 any of it and the Kubernetes bundle does. That asymmetry is deliberate rather than
 an oversight.
 
+**None of it is Kubernetes-only, though**, and the table below is the most
+misread thing in this document. The manifest triggers the drain from a `preStop`
+hook; a VM operator triggers the identical drain from `ExecStop` in the systemd
+unit, with the same three config keys and one extra obligation about the stop
+timeout.
+[Step 1 of the uptime sequence](#step-1-lame-duck-mode-on-the-broker-you-already-have)
+has that form, and it is the first thing to do on a single machine even though, per
+the paragraph above, it does not save that machine's connections.
+
 **How the Kubernetes manifest wires it, and how far it has been tested.** Five
 settings in [`kubernetes/mesh.yaml`](../kubernetes/mesh.yaml) have to agree with
 each other, and reading any one of them alone will mislead you:
@@ -724,7 +1068,11 @@ One mechanism that looks alarming and is not. The `preStop` hook returns as soon
 the signal is delivered, so the kubelet then sends SIGTERM to a server that is
 still draining. That is survivable by design: once lame duck is already in
 progress, `nats-server` ignores SIGTERM, so the drain runs to completion on its own
-schedule and the only real deadline is the pod's grace period.
+schedule and the only real deadline is the pod's grace period. **SIGINT is not the
+same**, and the distinction matters wherever you decide which signal stops the
+server: SIGINT shuts it down whether or not a drain is in progress, so
+`nats-server --signal quit`, Ctrl-C, and a systemd unit that sets
+`KillSignal=SIGINT` all abort a drain and drop whatever connections are left.
 
 **What has actually been proven, and what has not.** The mechanism was run against
 a real `nats-server` binary on Linux rather than reasoned about from the manifest:
@@ -740,7 +1088,10 @@ first rolling restart rather than assuming it.
 ### 5.2 The hard restart, which is what the single-node shapes do
 
 There is no graceful path on a single node, and the reference deployment does not
-pretend otherwise. `docker compose restart nats`, or
+pretend otherwise. Configuring lame duck there
+([step 1](#step-1-lame-duck-mode-on-the-broker-you-already-have)) makes the drop
+orderly and buys the mechanism you need at step 5; it does not make the restart
+free. `docker compose restart nats`, or
 `systemctl restart nats`, drops every client connection
 ([R4](operator-handbook.md#r4-restart-the-broker)). The handbook is right to call
 this a small outage rather than a config refresh, and to say so next to the
@@ -822,10 +1173,10 @@ a trap in it that is worth knowing about while you are still planning, because i
 determines whether your CI tells you the truth.
 
 **The manual checklist is in the handbook**, at
-[2.5](operator-handbook.md#25-verify-it-is-actually-working): eight steps in
+[2.5](operator-handbook.md#25-verify-it-is-actually-working): nine steps in
 order, each ruling out one layer, from the health endpoint through to a real agent
 answering. Run it in that order rather than sampling it. The two steps people skip
-are steps 6 and 7, because they test for a **refusal** rather than a success:
+are steps 7 and 8, because they test for a **refusal** rather than a success:
 whether the broker rejects a connection with no credential, and whether a guest
 credential is actually denied the subjects that matter. Those two are the only
 checks on the list that can catch a broker running with authentication switched

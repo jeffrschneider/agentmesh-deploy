@@ -77,6 +77,7 @@ this repository or at https://dev.agentmesh.ai.
 - [6. What is enforced where](#6-what-is-enforced-where) — impossible, merely refused, or only a convention in our code
 - [7. Limits, and where they are set](#7-limits-and-where-they-are-set) — every default and the env var that changes it
 - [8. Where this handbook is uncertain](#8-where-this-handbook-is-uncertain) — what could not be verified, named rather than guessed
+- [9. The operator console, screen by screen](#9-the-operator-console-screen-by-screen) — what each screen is for, what you can do from it, and what it needs configured
 
 ---
 
@@ -89,6 +90,7 @@ Fill these in once. Nothing below assumes any host but yours.
 | `<MESH_HOST>` | the DNS name your broker answers on, as agents and browsers reach it | `mesh.example.com` |
 | `<API_BASE>` | the public HTTPS base of your API gateway. Exported as `$API` in the commands below | `https://api.example.com` |
 | `<CONSOLE_URL>` | the public HTTPS base of your operator console | `https://console.example.com` |
+| `<BRIDGE_BASE>` | the base URL of your A2A bridge, if you run one. Exported as `$BRIDGE` where it is used | `https://a2a.example.com` |
 | `<MESH_WS>` | the browser-reachable NATS WebSocket, TLS-terminated | `wss://mesh.example.com` |
 | `<MESH_NAME>` | the name your mesh advertises in credential responses (`MESH_NAME`) | `example.com` |
 | `<INSTALL_ROOT>` | where the deploy tree lives, on a VM install | `/opt/agentmesh` |
@@ -103,7 +105,7 @@ Fill these in once. Nothing below assumes any host but yours.
 | `<REGISTRAR>` | the registrar you point `PAN_REGISTRAR` at. Defaults to `https://naming.agentmesh.ai` | |
 | `<HANDLE>` | a handle on your mesh | `Coder.you@example.com` |
 | `<OPERATOR_EMAIL>` | the email address of an operator who owns room and agent quota | |
-| `<AGENTMESH_VERSION>` | the image tag you pinned. `0.2.0` is the only published version at the time of writing | |
+| `<AGENTMESH_VERSION>` | the image tag you pinned. All four AgentMesh images carry one version. `0.2.0` is what is in the registry at the time of writing; both bundles here pin `0.2.1`, which publishes when the next release is cut ([1.1](#11-the-pieces)) | |
 
 Two shell variables recur, so set them before you start reading:
 
@@ -140,7 +142,9 @@ in front. It is a browser client: it talks to the API gateway over HTTPS and to
 the broker over a NATS WebSocket, directly. There is no console server beyond a
 file server. Published as `ghcr.io/jeffrschneider/agentmesh-console`. It
 **refuses to load over plain HTTP off loopback** — see
-[5.4](#54-a-screen-has-gone-blank).
+[5.4](#54-a-screen-has-gone-blank). How to open it is
+[2.6](#26-open-the-operator-console); what is behind each screen is
+[section 9](#9-the-operator-console-screen-by-screen).
 
 **Registrar (PAN).** A separate Rust service that owns handles like
 `<HANDLE>` and serves registrar-signed cards. Handles resolve over ordinary
@@ -170,8 +174,61 @@ deployment bundle** and is not published. The console's Fleet view exists and
 proxies a fleet daemon's health through `FLEET_MANAGER_URL`; with that unset the
 view 503s, which is the correct state for a deployment that has no fleet.
 
-**Bridge (A2A).** A translator between AgentMesh and Google A2A on port 8090.
-Also not published as an image; optional either way.
+**Bridge (A2A).** A translator between AgentMesh and Google A2A on port 8090,
+and a mesh **node** rather than an agent: it holds one credential and vouches for
+the external A2A parties it bridges. Inbound, a stock A2A client reaches mesh
+agents through it; outbound, `ATTACH` puts an external A2A server on the mesh as
+an ordinary discoverable agent. It now ships in both bundles here and has a block
+for the VM shape in [R5](#r5-deploy-services-agents-bridge-and-console). Two
+things to know before running it: it needs its own `bridge.creds`, and **it
+refuses every inbound call until you configure `API_KEYS` or `ALLOW_ANONYMOUS`**
+— it starts, warns that it is closed, and answers 401 to everything, because a
+caller it admits gets a node-vouched mesh identity. Optional: nothing else
+depends on it.
+
+**A2A eval agent.** A stateless HTTP agent on port 8091 that exists to be called
+by [step 10](#25-verify-it-is-actually-working) of the verification checklist. It
+holds no credential and never connects to the mesh; the bridge attaches it, and
+that is what puts it there. Its answer is a fixed transform of its input, so the
+expected reply is known before the call is made and "the bridge works" is a
+string comparison. Optional, and pointless without the bridge.
+
+**All four images are built by one release workflow, and two of them have not
+been pushed yet.** `agentmesh-services`, `agentmesh-console`,
+`agentmesh-eval-agent` and `agentmesh-bridge-a2a` each have a Dockerfile in the
+AgentMesh repository, and the release workflow builds, smoke-tests and pushes all
+four together under a single version. What is in the registry at the time of
+writing is `agentmesh-services:0.2.0` and `agentmesh-console:0.2.0`; the eval
+agent and the bridge have never been pushed at all. Both bundles here pin
+`0.2.1`, which is the version all four publish as the next time a release is
+cut — so until that release, `docker compose up -d` and `kubectl apply` fail to
+pull, and an operator either builds the two missing images by hand (`docker build
+-f eval-agent/Dockerfile -t <your-registry>/agentmesh-eval-agent:<AGENTMESH_VERSION> .`
+from the repository **root**, and the same shape for `bridge-a2a/Dockerfile`) or
+deletes those two services.
+
+The version moved to `0.2.1` rather than staying at `0.2.0` because the workflow
+builds every image from current `main` at whatever version it is handed:
+publishing the new pair at `0.2.0` would rebuild and re-push the services and the
+console at `0.2.0` too, replacing already-published images with substantially
+different content under a version that already names something else. One version
+naming two different builds is worth a patch bump to avoid.
+
+**A package's first publish lands private, and that failure is indistinguishable
+from never having published it.** A GitHub container registry package stays
+private until someone makes it public once, by hand, in that package's own
+settings. An anonymous pull of a private package returns a denied error, so the
+operator sees Compose failing to pull or a pod in `ImagePullBackOff` — exactly
+what a tag that does not exist looks like. It bites once per package and never
+again. Whoever cuts the first release that publishes the eval agent and the
+bridge has to flip both new packages to public afterwards; and anyone debugging a
+pull failure at a version that was definitely released should check package
+visibility before suspecting anything else. A package you keep private on purpose
+needs registry credentials on the puller instead — an `imagePullSecret` in
+Kubernetes, `docker login` for Compose — and neither bundle configures one.
+
+[Section 8](#8-where-this-handbook-is-uncertain) records what all of this leaves
+unverified.
 
 ### 1.2 Required versus optional
 
@@ -183,7 +240,8 @@ Also not published as an image; optional either way.
 | Registrar | Optional | Handles do not resolve through *your* registrar; agents are reachable by raw key, or by handle through whichever registrar `PAN_REGISTRAR` names (default `https://naming.agentmesh.ai`). |
 | Nodes / adapters | Required to be *useful* | A mesh with no nodes is a mesh with no agents. |
 | Fleet manager | Optional | Only relevant when one host runs several agents. The console's Fleet view 503s without `FLEET_MANAGER_URL` and its token file. |
-| Bridge (A2A) | Optional | No A2A interop. |
+| Bridge (A2A) | Optional | No A2A interop: no stock A2A client can call a mesh agent, and no external A2A server appears on the mesh. Nothing else notices. Its image has a Dockerfile and is built by the release workflow, but is not in the registry until `0.2.1` is published ([1.1](#11-the-pieces)). |
+| A2A eval agent | Optional | Step 10 of [2.5](#25-verify-it-is-actually-working) has nothing deterministic to call, so the bridge is provable only against a real agent whose answer you have to judge. Pointless without the bridge. |
 | Postgres (history) | Optional | `METRICS_DB_URL` unset means no charts; the mesh is unaffected. |
 | Object storage (rooms drive) | Optional | `ROOMS_DRIVE_BACKEND` defaults to `nats`, which keeps artifacts in JetStream and needs nothing else. |
 | Mail | Conditional, and **not portable today** | Without it there are no sign-in links, so no user accounts. See the mail decision in [planning-and-sizing.md §1.3](planning-and-sizing.md#13-the-five-that-deserve-more-than-a-row) and [5.5](#55-mail-is-not-arriving). Newer builds of the services *refuse to start* under `NODE_ENV=production` with no mail key; the published `0.2.0` image does not. |
@@ -194,19 +252,29 @@ Which one to choose, and what each costs in availability and in disk, is
 [planning-and-sizing.md §2](planning-and-sizing.md#2-infrastructure-shapes). What
 follows is what each shape *is*, so that the runbooks below make sense.
 
-**Docker Compose.** [`compose/`](../compose/) in this repository — four containers
-(`bootstrap`, `nats`, `services`, `console`) and three named volumes. `bootstrap`
-runs `nsc` once to mint the whole credential chain and write `/data/nats.conf`,
-then exits; `services` mounts that volume read-only. No TLS, no ingress, no
-registrar, no agents. Right for evaluating, for a private mesh behind a firewall,
-and for a branch office.
+**Docker Compose.** [`compose/`](../compose/) in this repository — six containers
+(`bootstrap`, `nats`, `services`, `console`, `eval-agent`, `bridge`) and three
+named volumes. `bootstrap` runs `nsc` once to mint the whole credential chain and
+write `/data/nats.conf`, then exits; `services` mounts that volume read-only. No
+TLS, no ingress, no registrar, no agents. Right for evaluating, for a private
+mesh behind a firewall, and for a branch office. The last two containers are the
+A2A pair, and two things about them are worth knowing before you `up`: their
+images are built but not yet pushed, so the pinned tag does not resolve until
+`0.2.1` is released ([1.1](#11-the-pieces)), and `bootstrap.sh` short-circuits on
+an existing install, so a mesh brought up before they were added has no
+`bridge.creds` and must mint one by hand — the command is in
+[`compose/README.md`](../compose/README.md#upgrading-an-existing-deployment).
 
 **Kubernetes.** [`kubernetes/mesh.yaml`](../kubernetes/mesh.yaml) — a 3-replica
 NATS StatefulSet with Raft clustering and a 10Gi PVC per replica, `services` as a
-1-replica Deployment with a 1Gi state PVC, `console` at 2 replicas. Credentials
-are minted on a workstation with `nsc` and loaded as three Kubernetes Secrets;
-there is deliberately no bootstrap container. There is no Namespace object and no
-Ingress object in the manifest — you create both.
+1-replica Deployment with a 1Gi state PVC, `console` at 2 replicas, and the A2A
+pair (`bridge` pinned at 1, `eval-agent` elastic). Credentials are minted on a
+workstation with `nsc` and loaded as Kubernetes Secrets; there is deliberately no
+bootstrap container. There is no Namespace object and no Ingress object in the
+manifest — you create both. If you do put an ingress in front of the bridge,
+`TRUSTED_PROXIES` must name the ingress pod CIDR and not `loopback`, or every
+caller collapses into one identity and one rate bucket; the manifest says so at
+the line that sets it.
 
 **A VM with a process manager.** Not shipped here as a recipe, but it is what the
 hosted instance runs and the runbooks below cover it: the services and the console
@@ -229,7 +297,8 @@ Both published shapes pin their images at a version. **Pin, never track
 | 3001 | Platform services HTTP (`API_PORT`) | Behind TLS as `<API_BASE>` |
 | 3000 | Operator console under `serve`, on a VM install | Behind TLS as `<CONSOLE_URL>` |
 | 8080 | Console in both container shapes | Behind TLS as `<CONSOLE_URL>` |
-| 8090 | A2A bridge (`PORT`) | Only if you run it |
+| 8090 | A2A bridge (`PORT`) | Only if you run it. Public if stock A2A clients call it, and behind TLS if so; `/` and `/healthz` are open, every other route needs a key. |
+| 8091 | A2A eval agent (`PORT`) | Only if you run it. Its only intended caller is the bridge, so it does not need to leave the deployment's own network; the bundles publish it anyway so a failing check can be split in one command. |
 | 5174 | Console dev server | http://localhost:5174 |
 
 ### 1.5 Where things live
@@ -284,6 +353,15 @@ actually has to provide, the three infrastructure shapes and their tradeoffs, th
 sizing arithmetic and which limit binds first, an honest account of what clustering
 does and does not buy you today, and rolling upgrades.
 
+If your question is specifically *how do I get better uptime than one machine, and
+in what order*, that document answers it as a sequence rather than leaving you to
+assemble one:
+[how to get higher uptime, in order](planning-and-sizing.md#how-to-get-higher-uptime-in-order).
+Seven steps, each with what it buys and what it does not, and only one of them
+costs hardware. Its first step is a broker config block and a systemd `ExecStop`
+that cost nothing and are what later makes a three-broker restart invisible;
+[R4](#r4-restart-the-broker) is where the restart itself lives.
+
 Two of those decisions are worth naming here rather than only there, because both
 are made at the moment you first run `bootstrap` and neither has a practical undo:
 **custody of the operator keys**, which are the mesh's identity and cannot be
@@ -318,6 +396,7 @@ cause of "the deployment is up but the thing doesn't work". See
 |---|---|---|
 | `<CREDS_DIR>/services.creds` | `NATS_CREDS` | Broker rejects the connection; process exits 1 and the supervisor crash-loops. |
 | `<MAIL_API_KEY_FILE>` | `RESEND_API_KEY` | On builds carrying the mail guard, `NODE_ENV=production` with no key **refuses to start**. The published `0.2.0` image predates the guard and starts fine. Check your boot log for the `[auth] email:` line to know which you have. |
+| `<CREDS_DIR>/bridge.creds` | `CREDS_FILE` | The A2A bridge's own, not the services'. Missing file: exits 1 on the read. Variable unset: it connects anonymously, the broker refuses, and it exits 1. Only relevant if you run the bridge. |
 
 **Closed-by-default without these** (safe, but the surface is unusable):
 
@@ -325,6 +404,7 @@ cause of "the deployment is up but the thing doesn't work". See
 |---|---|---|
 | `<CREDS_DIR>/operator.key` | `MESH_OPERATOR_KEY_FILE`, or `MESH_OPERATOR_KEY` as a value | No automation access. |
 | `<CREDS_DIR>/operator-auth.json` | `MESH_OPERATOR_AUTH_FILE` | No console login. With *neither* this nor the key, every `/v1/operator/*` route answers 503 `operator surface not configured`. A fresh deployment is closed, not open. |
+| (a value, not a path) | `API_KEYS` on the bridge | Every inbound A2A call is refused with 401 and the bridge does no mesh work for anyone. It says so at startup. `ALLOW_ANONYMOUS=1` is the other way to open it, and opens it to everyone who can reach the port. The outbound direction is unaffected either way. |
 
 In both container shapes the entrypoint solves the second row for you: with
 `MESH_OPERATOR_AUTH_FILE` set and the file absent, it creates a login for
@@ -423,7 +503,7 @@ template for the pool is being prepared and will be published separately; until
 it lands, treat this bundle as what its header says it is, a mesh for evaluating
 and for a private network behind a firewall, and before anyone you do not fully
 trust can reach 4222, 4443 or `/v1/guest`, verify the denies yourself
-([section 2.5](#25-verify-it-is-actually-working), steps 6 and 7).
+([section 2.5](#25-verify-it-is-actually-working), steps 7 and 8).
 
 ### 2.3 Bring up a mesh on Kubernetes
 
@@ -509,7 +589,7 @@ Do these in order. Each one rules out a layer.
 
 A programmatic `mesh doctor` that performs this whole list, including the two
 refusal checks at the end, is planned and will replace the manual steps. Until it
-ships, this checklist is the tool, and steps 6 and 7 are the ones people skip
+ships, this checklist is the tool, and steps 7 and 8 are the ones people skip
 because they test for a refusal rather than a success. Do not skip them: they are
 the only steps here that can catch a broker running with authentication off, or a
 guest credential minted with the run of the account.
@@ -571,7 +651,26 @@ mesh-adapter diag ping <HANDLE> --turn     # a full turn through the agent's mod
 Echo proves resolution, transport, and daemon liveness with no model call and no
 tokens. `--turn` proves the agent itself and decomposes the latency.
 
-**6. The broker refuses a connection with no credential.** This is the check for
+**6. The operator console signs in and shows the mesh.** One action exercises
+four layers at once: the API gateway, the operator auth file, the session store
+in JetStream, and the console's own connection to the broker. Open it
+([section 2.6](#26-open-the-operator-console)) and sign in with the id and
+password from the `OPERATOR CONSOLE LOGIN` banner.
+
+The pass condition is three things on the Overview screen together: the sign-in
+is accepted, the status in the top bar reads `connected · mesh`, and the tiles
+carry numbers instead of `…`. Each way it fails names a different layer.
+`login is not configured` is the auth file
+([R9](#r9-set-or-change-the-operator-console-login)). `session store
+unavailable` is JetStream, not your password. A sign-in that is accepted while
+the top bar reports a connection failure is the *mesh* leg rather than the API
+leg: the console reaches the broker by calling `POST /v1/guest` and connecting
+with the credential it gets back, so an empty guest pool or an unreachable
+WebSocket port leaves every mesh-backed screen dead while Accounts, Rooms,
+Fleet and Charts keep working. A page with no sign-in form at all is one of the
+four causes in [5.4](#54-a-screen-has-gone-blank).
+
+**7. The broker refuses a connection with no credential.** This is the check for
 the failure that looks like nothing: a broker accidentally running without
 authentication accepts everyone, and every other step on this list still passes.
 
@@ -588,7 +687,7 @@ the message being published. If it publishes, the broker is not enforcing
 authentication, every credential you minted is decoration, and nothing else on
 this list means anything until the broker config is fixed.
 
-**7. A guest credential is denied the subjects that matter.** Skip this if you
+**8. A guest credential is denied the subjects that matter.** Skip this if you
 skipped step 3. Save the credential `/v1/guest` returned to a file, then probe a
 privileged subject with it, subscribe and publish separately:
 
@@ -613,9 +712,152 @@ fails, and that is the point of running it; see the warning in
 [section 2.2](#22-bring-up-a-mesh-with-compose) for why, and what must change
 before the instance is exposed to anyone.
 
-**8. The mesh still behaves.** Run the conformance suites —
+**9. The mesh still behaves.** Run the conformance suites —
 [R15](#r15-prove-the-deployment-is-behaving), and read its warning about the
 endpoint defaults first.
+
+**10. A stock A2A client reaches a mesh agent through the bridge.** Skip this if
+you do not run the bridge.
+
+This step is last on purpose, and the position is the diagnosis. Everything above
+has already proved the mesh half: the broker accepts and refuses correctly (1, 7,
+8), the services are up and registering (2), and a real agent answers a real mesh
+request (5). So a failure *here*, with all of those green, is the bridge or the
+agent behind it, and nothing else. The call goes in one side of the bridge as
+A2A, out the other side as a mesh request, back through the mesh to the eval
+agent, and returns — so it exercises both directions of the bridge in one
+command.
+
+**The bridge now requires a credential.** Two different ones, in fact, and it is
+worth being clear which is which:
+
+- Its **mesh** credential is `bridge.creds`, minted by `bootstrap.sh` in Compose
+  and loaded as the `bridge-creds` Secret on Kubernetes. A mesh bootstrapped
+  before the bridge was added does not have one — see
+  [`compose/README.md`](../compose/README.md#upgrading-an-existing-deployment)
+  for the one command that mints it. Without it the bridge exits at startup and
+  this step fails at the connection, not at the call.
+- The **caller's** credential is a bridge API key, which is what the command
+  below sends. It comes from `BRIDGE_API_KEYS` in `compose/.env` or the
+  `bridge-api-keys` Secret on Kubernetes, in `key=label` form; the key is the
+  part before the `=`. There is no default and none is generated for you: with
+  neither `API_KEYS` nor `ALLOW_ANONYMOUS` set the bridge refuses every inbound
+  call with 401 and says so at startup, which is its shipped state. `openssl rand
+  -hex 24` is a fine way to make one.
+
+Set the two variables, find the eval agent's mesh id, and call it:
+
+```bash
+export BRIDGE=http://localhost:8090          # or your <BRIDGE_BASE>
+export BRIDGE_KEY=…                          # the key half of BRIDGE_API_KEYS
+
+# The bridge mints a fresh mesh id for an attached agent on every attach, so
+# look it up rather than pinning it. /agents lists what the bridge exposes.
+EVAL_ID=$(curl -fsS -H "Authorization: Bearer $BRIDGE_KEY" $BRIDGE/agents \
+  | jq -r '.agents[] | select(.name == "AgentMesh eval agent") | .id')
+echo "$EVAL_ID"
+
+curl -fsS -X POST "$BRIDGE/agents/$EVAL_ID/rpc" \
+  -H "Authorization: Bearer $BRIDGE_KEY" \
+  -H "Content-Type: application/json" \
+  -H "A2A-Version: 1.0" \
+  -d '{"jsonrpc":"2.0","id":"validate","method":"SendMessage","params":{"message":{"role":"ROLE_USER","parts":[{"data":{"ping":"agentmesh"}}]},"configuration":{"blocking":true}}}' \
+  | jq -Sc '.result.message.parts[0].data'
+```
+
+The expected output is exact, and that is the point of the eval agent — it
+answers with a fixed transform of its input, with no timestamp and no generated
+id anywhere in the asserted part, so this is a string comparison rather than a
+judgement:
+
+```json
+{"agent":"agentmesh-eval-agent","echo":{"ping":"agentmesh"},"skill":"echo"}
+```
+
+`jq -S` sorts keys, so that line is what you get whatever order the hops happen
+to serialise in. As one assertion:
+
+```bash
+[ "$(… the curl above …)" = '{"agent":"agentmesh-eval-agent","echo":{"ping":"agentmesh"},"skill":"echo"}' ] \
+  && echo PASS || echo FAIL
+```
+
+Each way it fails names a different thing:
+
+| What you get | What it means |
+|---|---|
+| `401` with `credentials_required` | No key reached the bridge, or the bridge has none configured. Its startup log says which. |
+| `401` with `invalid_key` | The key is not one of `API_KEYS`. Note it is the part *before* the `=`; the label is not a credential. |
+| `429` | You are over `RATE_PER_MINUTE` for this caller. Behind a proxy with `TRUSTED_PROXIES` unset, every caller shares one bucket, so this can mean somebody else's traffic. |
+| `EVAL_ID` comes back empty | The bridge is up but the eval agent is not on the mesh. Attachment is attempted once at bridge startup and never retried, so this is usually a bridge that started before the eval agent or before the services. Restart the bridge. It also happens if the attachment was given `visibility: unlisted`: the bridge's inbound side refuses to expose an unlisted or private agent, so it must be attached public to be reachable by this check. And `/agents` lists the first 100 discoverable agents, so on a large mesh read the id off the bridge's own startup log (`attached "AgentMesh eval agent" … as <id>`) instead. |
+| `-32603` mentioning `AGENT_UNAVAILABLE` or a timeout | The bridge reached the mesh but nothing answered for that id. The eval agent is registered and its HTTP endpoint is not reachable *from the bridge* — check `PUBLIC_BASE_URL` on the eval agent, which is the URL the bridge fetches out of the card and must resolve in the bridge's network. |
+| The right shape, wrong values | Something between the two rewrote the payload. Report it; nothing in this path is supposed to transform anything but the envelope. |
+
+To split the bridge from the agent, call the eval agent directly. It needs no
+credential and answers the same transform, so a correct answer here with a
+failure above puts the fault squarely in the bridge. Both bundles publish it on
+8091 for exactly this (`kubectl -n agentmesh port-forward svc/eval-agent
+8091:8091` on Kubernetes):
+
+```bash
+curl -fsS -X POST http://localhost:8091/rpc \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":"direct","method":"SendMessage","params":{"message":{"role":"ROLE_USER","parts":[{"data":{"ping":"agentmesh"}}]}}}' \
+  | jq -Sc '.result.message.parts[0].data'
+```
+
+### 2.6 Open the operator console
+
+The console is a static browser app with no server of its own beyond a file
+server. It talks to two things directly from the browser: the API gateway for
+the operator API, and the broker's WebSocket port for everything it reads off
+the mesh. Where it is *served* from therefore says nothing about what it can
+reach. `API_URL` and `NATS_WS_URL` say that, and both are resolved by the
+browser, never by the container.
+
+```bash
+# Compose: the console, the API and the WebSocket port are all published on
+# the host, so this needs nothing else — http://localhost:8080
+
+# Kubernetes: no Ingress ships in the manifest, and the console's default
+# API_URL/NATS_WS_URL name localhost, so forward all three — http://localhost:8080
+kubectl -n agentmesh port-forward svc/console     8080:8080 &
+kubectl -n agentmesh port-forward svc/services    3001:3001 &
+kubectl -n agentmesh port-forward svc/nats-client 4443:4443 &
+
+# VM: the built console is served on :3000 and belongs behind TLS as
+# <CONSOLE_URL>. With no TLS front yet, tunnel it — http://localhost:3000
+ssh -L 3000:localhost:3000 <host>
+```
+
+Sign in with the id and password from the `OPERATOR CONSOLE LOGIN` banner the
+services printed on first start, or set one with
+[R9](#r9-set-or-change-the-operator-console-login). A session lasts 12 hours.
+
+**Why a tunnel works where the host's own address does not.** The console
+refuses to load over plain HTTP: signing in would put the operator password and
+then the session bearer on the wire in clear, and that session is the whole
+operator surface. Loopback is the exemption. It loads over `http:` when the
+hostname is `localhost`, `127.0.0.1` or `[::1]`, on the grounds that the traffic
+never leaves the machine, and both `ssh -L` and `kubectl port-forward` put the
+console on exactly such an address in your browser. That is why neither needs a
+certificate, and why aiming a browser at `http://<host>:3000` gets a refusal
+page instead of a login form. `ALLOW_INSECURE_HTTP=1` on the console container
+overrides the refusal and runs with a standing warning bar; it is a
+private-network concession, not a fix.
+
+**The two settings a self-hosted console must have.** With `API_URL` unset, a
+console served over TLS falls back to the public AgentMesh API rather than
+yours, because an HTTPS page cannot fetch `http://` and the guess has to land
+somewhere. Set `API_URL` and `NATS_WS_URL` to addresses a *user's browser* can
+reach; in Compose they arrive as `PUBLIC_API_URL` and `PUBLIC_NATS_WS_URL`, and
+Compose service names are wrong values for both. Then add the console's own
+origin to `MESH_CORS_ORIGINS` on the services, or the API gateway refuses it and
+the screens stay empty ([5.4](#54-a-screen-has-gone-blank)).
+
+What each screen is for, and which ones need something configured before they
+can answer at all, is
+[section 9](#9-the-operator-console-screen-by-screen).
 
 ---
 
@@ -827,6 +1069,15 @@ there is a peer to hand off to, and because five settings have to agree with eac
 other before a drain fits inside the pod's grace period. Both are in
 [planning-and-sizing.md §5](planning-and-sizing.md#5-rolling-upgrades).
 
+**It is not Kubernetes-only.** On a VM the same drain is triggered from `ExecStop`
+in the systemd unit, and the config block plus the `TimeoutStopSec` obligation that
+goes with it are
+[step 1 of the uptime sequence](planning-and-sizing.md#step-1-lame-duck-mode-on-the-broker-you-already-have).
+It will not save the connections on a single broker, since there is no peer to hand
+them to, and it makes the restart above take at least half a minute instead of
+about a second. It is still the first step, because it is what makes a three-broker
+restart invisible later. That section is also where the order of the rest lives.
+
 ### R5. Deploy services, agents, bridge and console
 
 With the published images, a deploy is a tag change.
@@ -845,9 +1096,15 @@ kubectl -n agentmesh rollout status deploy/services
 **Worked when:** `curl -fsS $API/healthz` returns `"ok":true`, and the console
 loads and signs in.
 
-The two images are released together under one version, deliberately: they are
-deployed together and talk to each other, so independent version numbers would
-only create pairs nobody has tested. Change both.
+All four images — services, console, eval agent and bridge — are released
+together under one version, deliberately: they are deployed together and talk to
+each other, so independent version numbers would only create combinations nobody
+has tested. Change every one you run, not just the two above.
+
+If a pull fails at a version you know was released, check the package's
+visibility before anything else: a registry package's first publish lands private
+and returns a denied error to an anonymous pull, which looks identical to a tag
+that was never pushed ([1.1](#11-the-pieces)).
 
 There is a gap of a few seconds in the services' HTTP surface while the swap
 happens, and it cannot be closed by briefly running two instances, because two
@@ -863,6 +1120,140 @@ are worth copying: build the services with the **repository root** as the contex
 because the services import the SDK's source rather than a published package; and
 refuse to deploy when the console build fails, so you never ship a stale console
 next to new services.
+
+#### The A2A bridge and the eval agent on a VM
+
+Both now have images, but a VM install of this shape already runs the services
+and the console from source under a process manager, so the pair goes there too
+rather than dragging a container runtime onto the host. (If you would rather run
+them as containers, the images publish at `0.2.1` — see
+[1.1](#11-the-pieces).) `ecosystem.config.cjs` lives on the host and is not in
+this repository, so this is the block to add to it rather than a diff you can
+apply. Four things in it are load-bearing and the rest is ordinary.
+
+```js
+// Reads a secret file at config-load time, returning undefined when it is not
+// there — the house pattern for the `*_FILE` family, which is why a feature
+// whose secret is missing simply does not arm. If your ecosystem file already
+// defines one of these, use that instead of adding a second.
+const fs = require("node:fs");
+const readSecret = (p) => { try { return fs.readFileSync(p, "utf8").trim(); } catch { return undefined; } };
+
+module.exports = {
+  apps: [
+    // … the existing agentmesh-services and agentmesh-console apps …
+
+    {
+      name: "agentmesh-eval-agent",
+      cwd: "<INSTALL_ROOT>/eval-agent",
+      script: "server.mjs",
+      env: {
+        PORT: "8091",
+        // The URL THE BRIDGE fetches out of the agent card. On one host that is
+        // loopback; if the bridge runs elsewhere it must be an address the
+        // bridge can reach.
+        PUBLIC_BASE_URL: "http://127.0.0.1:8091",
+        RATE_PER_MINUTE: "60",
+      },
+      min_uptime: "20s",
+      max_restarts: 10,
+    },
+
+    {
+      name: "agentmesh-bridge",
+      cwd: "<INSTALL_ROOT>/bridge-a2a",
+
+      // (1) and (2). NOT `npm start`, and NOT `npx tsx src/main.ts`. Both put
+      // wrappers between pm2 and the process that actually owns port 8090: a
+      // restart signal then kills the wrapper and orphans the listener, the
+      // socket stays held by a process nothing is tracking, and the replacement
+      // cannot bind. One process, so signals reach the thing holding the port.
+      script: "node",
+      args: "--import tsx src/main.ts",
+      // `script` is a binary here rather than a .js file, so say plainly that
+      // pm2 must exec it as given instead of choosing an interpreter for it.
+      interpreter: "none",
+
+      // (3) The bridge binds its port BEFORE connecting to the mesh, so a port
+      // conflict is now a fast, named exit. That is only half the fix. pm2
+      // scores a crash as a healthy restart when the process outlived
+      // min_uptime, whose default is one second — which is how an earlier
+      // conflict crash-looped 1,364 times over two and a half hours with
+      // max_restarts never tripping, because each doomed attempt spent long
+      // enough connecting to NATS to look like a successful start. Twenty
+      // seconds is longer than any legitimate startup here and shorter than any
+      // real uptime, so a bridge that cannot start now stops instead.
+      min_uptime: "20s",
+      max_restarts: 10,
+
+      // (4) The environment. Give MESH_URL, PORT and PUBLIC_BASE_URL real
+      // values and never "": those three are read with `??`, which treats the
+      // empty string as a value rather than as an absence, so an empty one
+      // replaces the code default instead of falling back to it. PORT: ""
+      // becomes Number("") = 0 and the bridge binds a port nobody is proxying
+      // to. Everything else here is read with a truthy test, which is why the
+      // rest may safely be blank.
+      env: {
+        // The SDK speaks NATS over WebSocket: 4443, not 4222.
+        MESH_URL: "wss://<MESH_HOST>:4443",
+        CREDS_FILE: "<CREDS_DIR>/bridge.creds",
+        PORT: "8090",
+        // Copied verbatim into every agent card the bridge generates, so it is
+        // the address a remote A2A client comes back to.
+        PUBLIC_BASE_URL: "<BRIDGE_BASE>",
+
+        // WITHOUT ONE OF THESE TWO THE BRIDGE REFUSES EVERY INBOUND CALL with
+        // 401 and warns at startup that it is closed. That is the shipped
+        // state, deliberately: a caller it admits gets a node-vouched mesh
+        // identity. `key=label,key2=label2`; the key is the part before the `=`.
+        API_KEYS: readSecret("<CREDS_DIR>/bridge-api-keys"),
+        // Only "1", "true", "yes" or "on" turn this on. Anything else is off
+        // and logs that it was not understood, so a typo cannot open the bridge.
+        ALLOW_ANONYMOUS: "",
+
+        // Whose X-Forwarded-For may be believed. Empty means nobody's, and
+        // callers are identified by socket address. BEHIND THE REVERSE PROXY
+        // THAT TERMINATES TLS THIS MUST NAME THE PROXY, or every caller on the
+        // internet shares one identity and one rate bucket: the proxy's. On the
+        // same host that is `loopback`; on another host, its address or CIDR.
+        // An entry that does not parse stops the bridge at startup rather than
+        // silently moving the trust boundary.
+        TRUSTED_PROXIES: "loopback",
+
+        // Inbound requests per minute, per caller identity.
+        RATE_PER_MINUTE: "30",
+
+        // Outbound: the eval agent, attached at startup. Public deliberately —
+        // the bridge's inbound side refuses to expose an unlisted or private
+        // agent, so an unlisted eval agent is unreachable by the check it
+        // exists to serve.
+        ATTACH: "http://127.0.0.1:8091",
+      },
+    },
+  ],
+};
+```
+
+Then, in the order the apps depend on each other:
+
+```bash
+cd <INSTALL_ROOT>
+pm2 startOrRestart ecosystem.config.cjs --only agentmesh-eval-agent
+pm2 startOrRestart ecosystem.config.cjs --only agentmesh-bridge
+pm2 save
+```
+
+Three things that are not in the block and will still stop it working. **The
+bridge needs two dependency trees installed, not one**: `npm ci` in
+`<INSTALL_ROOT>/bridge-a2a` *and* in `<INSTALL_ROOT>/sdk-typescript`, because the
+bridge imports the SDK's source by relative path rather than a published package,
+and the SDK's own dependencies resolve from its own directory. This is the same
+reason the services image copies both trees. **`tsx` is a runtime dependency
+here**, despite living in `devDependencies` — the bridge is not built ahead of
+time, so a `--omit=dev` install produces a bridge that cannot start. And **the
+attachment is attempted once, at startup, and never retried**: restart the eval
+agent on its own and the bridge keeps a mesh registration pointing at an agent
+that has moved on, so restart the bridge after it.
 
 ### R6. Roll back services or the console
 
@@ -1506,7 +1897,9 @@ The console is a browser client. Blank means one of four things.
 is not loopback, and it says so on the page rather than quietly putting the
 operator password on the wire. If you lost the TLS front, this is what you are
 looking at. Loopback is exempt: tunnel it with `ssh -L 3000:localhost:3000
-<host>` and open http://localhost:3000. The console image also takes
+<host>` and open http://localhost:3000, using the port your shape serves the
+console on — 3000 on a VM install, 8080 in both container shapes
+([2.6](#26-open-the-operator-console)). The console image also takes
 `ALLOW_INSECURE_HTTP=1`, which overrides the refusal and displays a standing
 warning; use it only on a network you control.
 
@@ -1801,6 +2194,21 @@ in [planning-and-sizing.md §3](planning-and-sizing.md#3-sizing-and-what-binds-f
 | Inbox backlog warning | 50 per mailbox (critical at 4×) | `OBLIGATIONS_INBOX_BACKLOG` | |
 | Capacity warn / critical | 75% / 90% | none | |
 
+A2A bridge and eval agent, if you run them. These are set on those processes, not
+on the services, and none of them is read from the mesh:
+
+| Limit | Default | Env var | Worth changing when |
+|---|---|---|---|
+| Bridge inbound rate | 30 / min / caller | `RATE_PER_MINUTE` | A caller is an API key when one is presented, otherwise a client address. Behind a proxy with `TRUSTED_PROXIES` unset, every caller shares one bucket. |
+| Bridge outbound ceiling | 120 / min per attachment | `ratePerMinute` in `ATTACH_FILE` | Across all mesh callers. It protects an endpoint you are spending on someone else's behalf, so raise it with their agreement. |
+| Bridge outbound, per mesh caller | 30 / min per attachment | `ratePerCallerPerMinute` in `ATTACH_FILE` | Stops one mesh agent consuming the whole ceiling. |
+| Bridge request body | 1 MB | none (hardcoded) | The same ceiling as the broker's `max_payload`. |
+| Bridge mesh request timeout | 60 s | none (hardcoded) | |
+| Bridge hosted identities | 5,000, least-recently-used evicted | none | One per distinct caller. Anonymous ones also expire after an hour idle. |
+| Bridge task records | 10,000, 1 h TTL | none | In memory, so a restart forgets them and `GetTask` answers "not found". |
+| Bridge remote health check | every 60 s | none | An unreachable attached remote is deregistered from the mesh and re-attached when it comes back. Note this is only for attachments that succeeded at startup; one that failed is not retried. |
+| Eval agent rate | 60 / min / client address | `RATE_PER_MINUTE` | Its own, because the bridge's outbound limiter is per-attachment and covers nothing else that can reach the port. `/healthz` is exempt, so container probes cannot exhaust it. |
+
 Registrar limits, if you run one: verification codes 5/hour per anchor
 (hardcoded), 15/hour per IP (`PAN_CODES_MAX_PER_IP_HOUR`), 500/hour globally
 (`PAN_CODES_MAX_PER_HOUR`); pairing 60/hour per IP; reverse resolution 300/hour
@@ -1814,12 +2222,33 @@ per IP; re-home 60/hour; invites 25/day per anchor and 50/day per IP; card TTL
 Everything below could not be verified for a deployment that is not the hosted
 one. Check your own host or cloud console before acting on any of it.
 
+**The A2A bridge and the eval agent are wired into all three shapes and have
+never been run as part of any of them.** Both bundles here carry the service
+definitions, and [section 2.5 step 10](#25-verify-it-is-actually-working) gives
+the call that proves them. The two images themselves are no longer the obstacle
+they were: both have Dockerfiles now, and both have been built and run as
+containers on their own. The eval agent returns the exact
+value step 10 expects, and the bridge starts, binds its port and reports
+`ready:false` from `/healthz` before its mesh connection is up, which is what
+proves `tsx` and the SDK source resolved inside the image. The release workflow
+repeats both checks on every build. Separately, the bridge's attachment code has
+been shown to accept the eval agent's card and forward a real call over HTTP.
+
+What is still unproven: the bridge holding a mesh credential, the mesh leg of
+that call, and the pair running together in either bundle. Neither image has been
+pushed either, so a deployment at the pinned `0.2.1` cannot pull them until a
+release is cut ([1.1](#11-the-pieces)). Treat every A2A instruction in this
+handbook as reviewed rather than exercised, and expect the first real run to find
+something.
+
 **Whether the image you pulled refuses to start without mail.** The startup guard
 that refuses the console mailer under `NODE_ENV=production` landed in the services
 source *after* the `0.2.0` images were published, and the images set
 `NODE_ENV=production` themselves. So `0.2.0` starts fine with no mail key, and a
-later image will not. Read your boot log for the `[auth] email:` line rather than
-trusting either statement.
+later image will not. `0.2.1` is a later image — it is built from current `main` —
+so the first deployment that pins it should expect to configure mail or drop
+`NODE_ENV=production`, even though the same bundle at `0.2.0` did not. Read your
+boot log for the `[auth] email:` line rather than trusting either statement.
 
 **Self-hosted mail is configurable but unproven end to end.** `MESH_MAIL_FROM`
 and `MESH_CONSOLE_URL` are the two settings that used to be missing, and the
@@ -1913,7 +2342,162 @@ Do not read the absence of a certificate panel as the absence of a duty.
 
 **Version pins drift across documents.** This repository's Compose README names
 one adapter version in its example, `mesh-adapter-latest.txt` in the release
-bucket moves independently, and `0.2.0` is the only published services and console
-version at the time of writing. Trust the release pointer for the adapter and your
+bucket moves independently, and the image version the bundles pin (`0.2.1`) is
+deliberately ahead of the version in the registry (`0.2.0`) until a release is
+cut ([1.1](#11-the-pieces)). Trust the release pointer for the adapter and your
 own pinned tag for the images; treat every version written into prose, including
 in this file, as a snapshot.
+
+---
+
+## 9. The operator console, screen by screen
+
+How to open it is [2.6](#26-open-the-operator-console). This is what is behind
+each screen once you are in, and what each one needs before it can answer.
+
+**Two data paths, with different guarantees, and the difference matters more
+than the layout does.** Accounts, Rooms, Fleet and Charts are read over your
+operator session against `/v1/operator/*`; nobody without that session sees
+them. Everything else — Overview's tiles, Nodes, Agents, Traffic, Usage, Live
+Feed, Diagnostics — is read over a guest connection to the mesh, the same free
+credential any visitor can get from `POST /v1/guest`. The sign-in is the front
+door of the operator UI, not an authorization boundary over those subjects:
+anyone holding a guest credential can make those same reads without this console
+and without signing in. If a mesh read must be privileged on your deployment,
+the enforcement has to be at the subject, not at this login.
+
+The sidebar has eleven entries. Three further surfaces are not sidebar entries
+and are easy to miss: the obligations panel at the top of Overview
+([9.2](#92-what-is-owed-at-the-top-of-overview)), the agent terminal, which
+opens from Fleet ([9.3](#93-the-agent-terminal-and-what-it-can-reach)), and the
+refused-message strip ([9.4](#94-messages-the-console-would-not-believe)).
+
+### 9.1 The eleven screens
+
+| Screen | What it answers | What you can do from it | What it needs |
+|---|---|---|---|
+| Overview | What is waiting on you, then mesh-wide counts: agents registered, online now, catalog entries, guest credentials issued and free, heartbeats seen since the page loaded, distinct skills | Refresh | Tiles: the guest mesh connection, plus `/auth/status` for the pool numbers. The panel on top: an operator session and `GET /v1/operator/obligations` (9.2) |
+| Accounts | Who signed up and when, which agents each owns, and where sandbox leases are concentrated by IP | Disable or enable an account (both directions confirm), ban or unban a sandbox IP, open one account to see its agents with registry state, counters and recent traffic, and release a handle | Operator session (`/v1/operator/overview`, `/v1/operator/accounts`). Handle release also needs `PAN_DELEGATE_SECRET`, or that one button 503s while the rest of the screen works |
+| Nodes | The node inventory: status, agents hosted, adapter version spread in one rollup line, device, trust tier, last seen | Ping, which echo-probes every named agent that node hosts and reports how many answered and the average round trip | Guest mesh connection. The "Related to" column resolves owners against `https://naming.agentmesh.ai`, which is compiled in and is **not** switched by `PAN_REGISTRAR`, so on a self-hosted mesh with its own registrar that column stays empty |
+| Agents | Every manifest in the registry: status, name, id, skills, hosting node, vouch expiry | Refresh | Guest mesh connection |
+| Rooms | Every durable room, metadata only: name, owner, privacy grade, age, messages, record size, files, last activity. Room contents never appear here, and ephemeral rooms have no central record to list | Reclaim, which deletes the room's record and frees its owner's quota slot. Members lose the replayable history and it cannot be undone | Operator session (`/v1/operator/rooms`). Reclaim additionally needs JetStream reachable, or it answers 503 |
+| Fleet | Whether a fleet host's agents are healthy: install, expected version, processes, adapter, the issues holding each one back, and the host's load, memory and disk, since the whole fleet shares one machine | Read-only for the fleet itself, deliberately: fixing a host is the fleet-manager CLI's job. Per agent it offers the doors that actually work — Terminal (9.3), and Web for the tools with a usable web UI | Operator session and `FLEET_MANAGER_URL` + `FLEET_MANAGER_TOKEN_FILE`; unset, the screen explains it is not connected rather than erroring. The Web door additionally needs `FLEET_UI_HOST` and its token |
+| Traffic | The mesh-wide request tail: time, status, from, to, skill, latency, and the first 80 characters of the input preview | Toggle auto-refresh, which polls every four seconds | Guest mesh connection **and** the connecting key named in `ACTIVITY_READER_KEYS`. Without that, `mesh.activity.list` does not refuse, it scopes the answer to exchanges the caller was a party to, which for a guest is none. An empty table here usually means "not a reader", not "no traffic" |
+| Usage | Counters only, never content: today's messages, traffic, delivered bytes and active agents; top talkers flagged against fair use; the last seven days; and every agent's lifetime totals | Refresh | Guest mesh connection **and** `ACTIVITY_READER_KEYS`. Unlike Traffic, `mesh.usage.list` and `mesh.usage.summary` refuse a non-reader outright, so this screen shows the refusal text instead of going quietly empty |
+| Charts | History from the Postgres recorder, as plain SVG lines: Growth, Activity, Infrastructure and Rooms, over 24h, 7d or 30d | Pick a tab and a range | Operator session and `METRICS_DB_URL`; unset answers 503 `history recording is not configured`. History begins the day the recorder was deployed, so a young deployment charting nothing is telling the truth |
+| Live Feed | `mesh.event.>` and `mesh.heartbeat.>` as they arrive, newest first, capped at 300 rows | Toggle events and heartbeats independently, Pause, Clear | Guest mesh connection |
+| Diagnostics | Which agent daemons are actually alive, at what round trip, on what adapter version and mode | Echo-ping all agents: a daemon-level echo on the `__diag_echo__` skill to every registered agent, in sequence rather than in a burst, because a burst from one guest looks like abuse | Guest mesh connection. It wakes no models and spends no tokens. An adapter too old to implement the echo answers something else, and the row says `answered, but not an echo` |
+
+Two things worth knowing before you read a screen wrongly. The Fleet screen's
+door buttons are keyed to the *names* of the agents in the reference fleet, so
+agents on your own fleet host will show `no interactive UI` unless they happen
+to share those names; that is a missing button, not a broken agent. And Usage's
+fair-use flags come from numbers compiled into the console, currently 10,000
+messages or 15 MB delivered per agent per day. They mark the published policy of
+the hosted service, not a limit your deployment enforces.
+
+### 9.2 What is owed, at the top of Overview
+
+The closest thing here to a health dashboard, and the only part of the console
+that reports what is waiting on a *person* rather than what is true. It is
+computed from live state each time it loads, in four groups, worst first:
+
+| Group | What it means |
+|---|---|
+| Waiting on your judgment | A queue where someone is blocked until you decide: a stranger asking to be admitted, a handle whose pinned key changed, an agent over fair use |
+| Filling up | A limit you are pressed against. At the cap these read as "broken" to a visitor rather than "busy" — an empty guest pool looks like a dead product |
+| Aging | Something verified once, where the verification is what has decayed. A backup nobody has restored is a hope, not a backup |
+| Dated | The few obligations that genuinely have a date. Most of this work is conditional rather than scheduled, which is why there is no calendar |
+
+**What a red row means.** Severity is carried by a word (`critical`), a glyph,
+the sort order and a left stripe that changes width and pattern, so it survives
+greyscale and colour blindness; read the word, not the hue. `critical` means one
+of three things depending on the group. In "waiting on your judgment" it is
+derived in the browser, not supplied by the service: a queue whose oldest item
+has been waiting **seven days or more**. In the other three groups the service
+graded it, and it means a limit is at the point where the mesh looks broken from
+outside, or a check the service is no longer willing to call current. A grade it
+does not recognise is shown as `warn` rather than `ok`, on the principle that
+over-reporting an unknown condition is the safer failure.
+
+**Read the stamp before acting on the panel.** The age of the reading is on
+screen and keeps ticking while the tab sits open. Past five minutes it says
+`stale`; it also says so when there is no timestamp, when the timestamp will not
+parse, and when the reading claims to have been computed in the future, which is
+clock skew between your browser and the services. The snapshot itself is
+recomputed on a schedule (`OBLIGATIONS_REFRESH_MS`, default five minutes,
+floor sixty seconds), and a snapshot older than three of those intervals is not
+served at all — the service collects live instead, more slowly, rather than hand
+you a stale number that looks authoritative.
+
+`Nothing is owed.` is a statement rather than a blank rectangle, so you can tell
+it apart from a panel that failed to load. A deployment whose API has no
+`/v1/operator/obligations` route says so in a plain muted line with no warning
+glyph, because an alarm for a feature the deployment never had is how operators
+learn to ignore alarms. With the operator surface unconfigured entirely, that
+route answers 503 like every other one ([5.4](#54-a-screen-has-gone-blank)).
+
+### 9.3 The agent terminal, and what it can reach
+
+The Fleet screen's `Terminal` button opens an interactive shell in a modal. Say
+this out loud rather than leaving it to be discovered by clicking: **an operator
+session plus a reachable fleet host is a shell credential.**
+
+What it reaches is a shell as *that agent's own Unix user* on the fleet host,
+non-root, attached to the warm session the fleet host holds open for that agent.
+It is a diagnostic convenience, not a management path, and it does not reach the
+services host, the broker, or any other agent's user.
+
+How it is authorized is worth knowing when you are deciding who gets a login.
+The console asks `POST /v1/operator/fleet/terminal` for a ticket; the services
+mint an HMAC over the agent name, a one-minute expiry and a random id, and the
+browser opens a WebSocket to the fleet host carrying that ticket in the
+WebSocket subprotocol rather than the query string, so it lands in neither the
+reverse proxy's access log nor browser history. The ticket is single-use. The
+same shape backs the `Web` button, which posts its ticket as a form body to open
+an agent's own web UI in a new tab.
+
+So the fences in front of a shell are: the operator login itself (12-hour
+sessions, five attempts per IP per fifteen minutes, and a twenty-failure global
+lockout — [section 7](#7-limits-and-where-they-are-set)), and whether the fleet
+manager is configured at all. With `FLEET_MANAGER_URL` unset there is no door.
+If the terminal opens and immediately reports that the fleet host refused the
+connection, the usual cause is a fleet host too old to read the ticket header.
+
+### 9.4 Messages the console would not believe
+
+*Present in the console source; not in the published `0.2.0` image. A `0.2.0`
+console shows no such strip.*
+
+The console verifies the signature on every mesh message it consumes, and frames
+that fail are neither displayed nor silently dropped. They are counted, on their
+own strip, at the top of Overview and above the Live Feed. The strip is absent
+rather than empty when nothing has been refused, so its presence is the signal.
+
+It reads `N messages in the last minute could not be verified` while it is
+happening, falls back to the count since the page loaded once a burst stops, and
+names the last few refusals with three facts each: the subject the frame arrived
+on, the reason (no signature, a signature that did not match the sender the
+frame named, or bytes that were not a readable envelope), and the identity the
+frame *claimed*, labelled as a claim. It never shows the payload, deliberately:
+a refused frame is attacker-controlled text, and quoting it would let the forger
+write into the operator console after all. Pause and Clear on the Live Feed do
+not touch the strip.
+
+**What to make of it.** Any account credential on the mesh may publish on the
+event and heartbeat subjects, so a message without a signature matching the
+sender it names proves nothing about who sent it. A handful of refusals is most
+likely an agent on an old client that does not sign. A steady count means
+somebody is publishing frames that cannot be verified, at a screen you make
+decisions from. Nothing refused is included in the heartbeat tile or shown in
+the feed, so those numbers get smaller when this appears, not larger.
+
+**What verification does not establish.** It proves the key named in `from`
+produced those bytes. It does not prove that a *reply* came from the registry,
+the activity service or the task manager, because a reply is matched by inbox
+rather than against an expected service key, and a forged reply signed with the
+forger's own key verifies perfectly well. So a verified row on the Live Feed is
+a real event from a real key, while a count on a reply-driven screen is still
+"whatever answered the request first". Closing that needs the services to
+publish their public keys somewhere a browser can trust, which no route does
+today.

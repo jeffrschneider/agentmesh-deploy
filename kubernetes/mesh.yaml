@@ -5,13 +5,23 @@
 #   kubectl -n agentmesh create secret generic mesh-config --from-file=accounts.conf=./accounts.conf
 #   kubectl -n agentmesh create secret generic services-creds --from-file=services.creds=./creds/services.creds
 #   kubectl -n agentmesh create secret generic sandbox-pool --from-file=./creds/pool/
+#   kubectl -n agentmesh create secret generic bridge-creds --from-file=bridge.creds=./creds/bridge.creds
+#   kubectl -n agentmesh create secret generic bridge-api-keys --from-literal=api-keys='<key>=<label>'
 #   kubectl -n agentmesh apply -f mesh.yaml
 #
-# The shape to understand before reading further: three objects with three
-# different scaling rules, which is why they are three objects.
+# The last two are for the A2A bridge. Both are optional in the mechanical
+# sense — the manifest marks them optional so a missing one does not wedge the
+# pod — and both change what the bridge can do: with no credential it cannot
+# reach the mesh, and with no API keys it refuses every inbound call. See the
+# bridge Deployment at the bottom.
+#
+# The shape to understand before reading further: objects with different scaling
+# rules, which is why they are different objects.
 #
 #   elastic  the console. Static files, no state, no subscriptions. Scale it
 #            freely; an autoscaler belongs here and nowhere else.
+#            The eval agent is elastic too, with one caveat: its rate limiter is
+#            per-pod, so N replicas is N times the cap it advertises.
 #   pinned   the services. Exactly one replica, and that is a correctness
 #            requirement rather than a cost choice: no subscription in the tier
 #            uses a NATS queue group, so NATS fans every request out to every
@@ -19,6 +29,10 @@
 #            a second time. Two local files (the usage counters and the console
 #            login hash) are per-replica on top of that.
 #            See docs/planning-and-sizing.md, section 4.3.
+#            The bridge is pinned as well, for a different reason: each replica
+#            is its own mesh node and attaches the eval agent under its own
+#            hosted identity, so two replicas put two of the same agent in the
+#            registry under two different ids.
 #   ballast  nats. Raft-replicated JetStream. The replica count is a decision,
 #            not a dial. An autoscaler pointed at this will eventually eat data.
 #            Note what it does and does not buy: application streams and KV
@@ -26,7 +40,7 @@
 #            connection failover, not data redundancy.
 #            See docs/planning-and-sizing.md, section 4.2.
 #
-# Never let a scaler see anything but the console.
+# Never let a scaler see anything but the console and the eval agent.
 
 ---
 apiVersion: v1
@@ -306,7 +320,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: services
-          image: ghcr.io/jeffrschneider/agentmesh-services:0.2.0
+          image: ghcr.io/jeffrschneider/agentmesh-services:0.2.1
           env:
             - name: NATS_URL
               value: nats://nats-client.agentmesh.svc.cluster.local:4222
@@ -388,7 +402,7 @@ spec:
     spec:
       containers:
         - name: console
-          image: ghcr.io/jeffrschneider/agentmesh-console:0.2.0
+          image: ghcr.io/jeffrschneider/agentmesh-console:0.2.1
           env:
             # Resolved by the BROWSER, so these are the addresses a user's
             # machine can reach, never in-cluster service names. Set them to
@@ -419,3 +433,214 @@ spec:
     app: console
   ports:
     - { name: http, port: 8080, targetPort: 8080 }
+
+---
+# The A2A eval agent: a stateless HTTP agent whose answer is predictable, so
+# post-install validation can assert an exact value rather than "something came
+# back". No credential, no mesh connection, no storage. The bridge below is what
+# puts it on the mesh.
+#
+# The image has a Dockerfile (eval-agent/Dockerfile) and is built, smoke-tested
+# and pushed by the AgentMesh release workflow along with the other three. It
+# has not been pushed yet: it publishes at 0.2.1 the first time a release is
+# cut, and until then nothing answers at this tag. To run it before that, build
+# it yourself from the AgentMesh repository ROOT —
+# `docker build -f eval-agent/Dockerfile -t <your-registry>/agentmesh-eval-agent:0.2.1 .`
+# — push it somewhere the cluster can pull from, and change the image below.
+# Delete this Deployment and its Service if you do not want it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eval-agent
+  namespace: agentmesh
+spec:
+  # Safe to raise: nothing here is shared between pods. Note only that the rate
+  # limiter is per-pod, so two replicas serve twice RATE_PER_MINUTE in total.
+  replicas: 1
+  selector:
+    matchLabels: { app: eval-agent }
+  template:
+    metadata:
+      labels: { app: eval-agent }
+    spec:
+      containers:
+        - name: eval-agent
+          image: ghcr.io/jeffrschneider/agentmesh-eval-agent:0.2.1
+          env:
+            # Set explicitly rather than inherited from the image, so that this
+            # and containerPort below cannot drift apart.
+            - name: PORT
+              value: "8091"
+            # Resolved by the BRIDGE, which fetches this URL out of the agent
+            # card — so unlike the console's API_URL and NATS_WS_URL, an
+            # in-cluster Service name is the RIGHT value here.
+            - name: PUBLIC_BASE_URL
+              value: http://eval-agent.agentmesh.svc.cluster.local:8091
+            - name: RATE_PER_MINUTE
+              value: "60"
+          ports:
+            - { name: http, containerPort: 8091 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8091 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 100m, memory: 128Mi }
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eval-agent
+  namespace: agentmesh
+spec:
+  selector:
+    app: eval-agent
+  ports:
+    - { name: http, port: 8091, targetPort: 8091 }
+
+---
+# The A2A bridge: a mesh node that vouches for external A2A parties in both
+# directions. Inbound, a stock A2A client reaches mesh agents through it;
+# outbound, ATTACH puts the eval agent above on the mesh as an ordinary agent.
+#
+# The image has a Dockerfile (bridge-a2a/Dockerfile) and is built, smoke-tested
+# and pushed by the AgentMesh release workflow along with the other three. Like
+# the eval agent it has not been pushed yet: it publishes at 0.2.1 the first
+# time a release is cut. Build it yourself before then with
+# `docker build -f bridge-a2a/Dockerfile -t <your-registry>/agentmesh-bridge-a2a:0.2.1 .`
+# from the repository ROOT — never from bridge-a2a/, which has no path to the
+# SDK source the bridge imports.
+#
+# TWO THINGS THAT ONLY SHOW UP IF YOU ADAPT THAT DOCKERFILE OR THE ENV BELOW:
+#
+#   tsx is a RUNTIME dependency. The bridge is not compiled; it runs
+#   `node --import tsx src/main.ts`, because it imports the SDK by relative
+#   source path. tsx sits in devDependencies anyway, so `npm ci --omit=dev` on
+#   its own yields an image that builds green and dies on its first line with
+#   `Cannot find package 'tsx'`.
+#
+#   An empty string is a VALUE here, not an absence. MESH_URL, PORT and
+#   PUBLIC_BASE_URL are read with `??`, so setting any of the three to "" below
+#   overrides the code default instead of falling back to it — PORT: "" becomes
+#   Number("") = 0 and the bridge binds a random port while the Service points
+#   at 8090. All three carry real values below; leave them that way. Every other
+#   variable is read with a truthy test, which is why ALLOW_ANONYMOUS and
+#   TRUSTED_PROXIES can safely be "".
+#
+# A FIRST PUBLISH LANDS PRIVATE. A ghcr package is private until it is made
+# public once, by hand, in the package settings, and an anonymous pull of a
+# private package fails with a denied error indistinguishable from an image that
+# was never published. Expect it once per package when 0.2.1 is first cut; a
+# cluster pulling from a private package needs an imagePullSecret instead.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bridge
+  namespace: agentmesh
+spec:
+  # One. Each replica is its own mesh node with its own hosted identities, and
+  # each runs ATTACH independently, so a second replica registers a SECOND copy
+  # of the eval agent under a different id. Discovery then returns two agents
+  # where there is one service. Not a throughput dial.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: bridge }
+  template:
+    metadata:
+      labels: { app: bridge }
+    spec:
+      containers:
+        - name: bridge
+          image: ghcr.io/jeffrschneider/agentmesh-bridge-a2a:0.2.1
+          env:
+            # The SDK speaks NATS over WebSocket, so 4443 and not 4222.
+            - name: MESH_URL
+              value: ws://nats-client.agentmesh.svc.cluster.local:4443
+            - name: CREDS_FILE
+              value: /creds/bridge.creds
+            - name: PORT
+              value: "8090"
+            # Copied verbatim into every agent card the bridge generates, so it
+            # is the address a remote A2A client comes back to. Set it to your
+            # ingress hostname; the placeholder below only works for
+            # kubectl port-forward.
+            - name: PUBLIC_BASE_URL
+              value: http://localhost:8090
+            # WITH NEITHER OF THE NEXT TWO SET THE BRIDGE REFUSES EVERY INBOUND
+            # CALL WITH 401, and says so at startup. That is the shipped state
+            # on purpose: an admitted caller gets a node-vouched mesh identity,
+            # so an open bridge is something an operator turns on knowingly.
+            # `optional: true` means a missing Secret leaves the variable unset
+            # rather than wedging the pod in CreateContainerConfigError — the
+            # bridge then runs, closed, which is a state you can diagnose from
+            # its own log.
+            - name: API_KEYS
+              valueFrom:
+                secretKeyRef: { name: bridge-api-keys, key: api-keys, optional: true }
+            # Only "1", "true", "yes" or "on" turn this on; anything else is
+            # off and logs that it was not understood.
+            - name: ALLOW_ANONYMOUS
+              value: ""
+            # BEHIND AN INGRESS THIS MUST BE THE INGRESS POD CIDR, NOT LOOPBACK.
+            # The bridge believes X-Forwarded-For only from these addresses, and
+            # the peer it actually sees is the ingress controller's POD, which
+            # is never 127.0.0.1 from inside this container. Leave it empty or
+            # set it to `loopback` behind an ingress and the header is ignored,
+            # so every caller on the internet is identified as the ingress pod:
+            # one mesh identity and one shared rate bucket for all of them, with
+            # nothing in any log to say it happened. Get the range from your CNI
+            # (`kubectl cluster-info dump | grep -m1 cluster-cidr`) or from the
+            # ingress controller's own pod IP, and narrow it as far as you can.
+            #   - name: TRUSTED_PROXIES
+            #     value: "10.42.0.0/16"
+            - name: TRUSTED_PROXIES
+              value: ""
+            - name: RATE_PER_MINUTE
+              value: "30"
+            # Attachment is attempted ONCE, at startup, and a failure is logged
+            # and not retried. Kubernetes has no depends_on, so a bridge that
+            # starts before the eval agent or before the services tier comes up
+            # will run without the eval agent on the mesh, indefinitely, and
+            # look healthy while doing it. The fix is a restart:
+            #   kubectl -n agentmesh rollout restart deploy/bridge
+            # It registers the remote PUBLIC deliberately: the bridge's inbound
+            # side refuses to expose an unlisted or private agent, so an
+            # unlisted eval agent is unreachable by the very check it serves.
+            - name: ATTACH
+              value: http://eval-agent.agentmesh.svc.cluster.local:8091
+          ports:
+            - { name: http, containerPort: 8090 }
+          volumeMounts:
+            - { name: creds, mountPath: /creds/bridge.creds, subPath: bridge.creds, readOnly: true }
+          # /healthz answers 200 once the mesh connection is up and 503 before
+          # it. The bridge binds its port BEFORE connecting to the mesh, on
+          # purpose, so "listening" and "ready" are genuinely different states
+          # and this probe reads the second one.
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8090 }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+      volumes:
+        # optional, so the pod still starts without it and the failure is a
+        # readable "cannot connect to the mesh" rather than a stuck pod.
+        - name: creds
+          secret: { secretName: bridge-creds, optional: true }
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bridge
+  namespace: agentmesh
+spec:
+  selector:
+    app: bridge
+  ports:
+    - { name: http, port: 8090, targetPort: 8090 }

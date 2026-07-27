@@ -10,6 +10,13 @@
 # Idempotent: if the config is already there, this exits without touching
 # anything. Deleting the volume is what starts over, and starting over means new
 # keys and therefore new credentials for every agent.
+#
+# The consequence of that short-circuit, for anything ADDED to this script
+# later: an existing deployment never runs the new lines. `bridge.creds` below
+# is the current example — a mesh bootstrapped before it was added has no such
+# file, and the bridge container will crash-loop on the missing path until the
+# credential is minted by hand. The README's "Upgrading an existing deployment"
+# section has the one command that does it.
 set -eu
 
 DATA=/data
@@ -40,6 +47,14 @@ $N generate creds -a "$ACCT" -n services > "$DATA/creds/services.creds"
 # One credential for a first agent, so there is something to connect with.
 $N add user -a "$ACCT" -n node-1 >/dev/null
 $N generate creds -a "$ACCT" -n node-1 > "$DATA/creds/node-1.creds"
+
+# The A2A bridge's own credential. The bridge is a mesh NODE, not an agent: it
+# holds one credential and vouches for every external A2A party it bridges, in
+# both directions. Its own credential rather than the services' one, so that
+# what the bridge did is distinguishable from what the platform did, and so that
+# revoking the bridge does not take the mesh down with it.
+$N add user -a "$ACCT" -n bridge >/dev/null
+$N generate creds -a "$ACCT" -n bridge > "$DATA/creds/bridge.creds"
 
 # Sandbox pool: the api service hands these out to guests. Without a pool it
 # still runs and reports zero available, which is a working mesh with guest

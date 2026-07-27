@@ -2,13 +2,60 @@
 #
 #   docker compose up -d
 #
-# Brings up a broker with JetStream, the platform services, and the operator
-# console, and mints its own operator keys on first run. Nothing to clone, no
-# credentials to prepare by hand.
+# Brings up a broker with JetStream, the platform services, the operator
+# console, the A2A bridge and the A2A eval agent it validates against, and mints
+# its own operator keys on first run. Nothing to clone, no credentials to
+# prepare by hand.
 #
-#   console  http://localhost:8080
-#   api      http://localhost:3001
-#   mesh     nats://localhost:4222   ws://localhost:4443
+#   console     http://localhost:8080
+#   api         http://localhost:3001
+#   mesh        nats://localhost:4222   ws://localhost:4443
+#   bridge      http://localhost:8090   (A2A; refuses every call until you set
+#                                        BRIDGE_API_KEYS — see .env.example)
+#   eval agent  http://localhost:8091   (what post-install validation calls)
+#
+# ALL FOUR IMAGES HAVE DOCKERFILES AND ARE BUILT BY ONE RELEASE WORKFLOW in the
+# AgentMesh repository, which builds, smoke-tests and pushes them together under
+# a single version. Nothing here has to be built by hand any more.
+#
+# What has NOT happened yet is the push. agentmesh-services and
+# agentmesh-console are on ghcr at 0.2.0; agentmesh-eval-agent and
+# agentmesh-bridge-a2a have never been pushed at all. All four publish at 0.2.1
+# when a release is cut, and until that release runs `docker compose up -d`
+# fails to pull at this pin. That is the pin doing its job, not a broken bundle.
+#
+# 0.2.1 rather than 0.2.0 deliberately. The workflow builds all four from
+# current main at whatever version it is handed, so publishing the two new
+# images at 0.2.0 would rebuild and re-push services and console at 0.2.0 too,
+# silently replacing already-published images with substantially different
+# content. One version would then name two different builds. A new patch
+# version costs nothing and avoids it.
+#
+# To run before the release, build them yourself. The context is the repository
+# ROOT for every one of these, never the component directory — the services and
+# the bridge import the SDK's source by relative path, so they need
+# sdk-typescript/ in the same context:
+#
+#   docker build -f eval-agent/Dockerfile \
+#     -t ghcr.io/jeffrschneider/agentmesh-eval-agent:0.2.1 .
+#   docker build -f bridge-a2a/Dockerfile \
+#     -t ghcr.io/jeffrschneider/agentmesh-bridge-a2a:0.2.1 .
+#
+# If you adapt the bridge's Dockerfile, know that the bridge is NOT compiled: it
+# runs `node --import tsx src/main.ts`, because it imports the SDK by relative
+# source path. tsx is therefore a RUNTIME dependency despite living in
+# devDependencies, and `npm ci --omit=dev` on its own produces an image that
+# builds green and then dies on its first line with `Cannot find package 'tsx'`.
+#
+# A FIRST PUBLISH LANDS PRIVATE. A ghcr package is private until someone makes
+# it public once, by hand, in the package settings, and an anonymous pull of a
+# private package fails with a denied error that is indistinguishable from an
+# image that was never published. It bites once per package and never again, so
+# expect it for these two the first time 0.2.1 is cut.
+#
+# Or delete the `bridge` and `eval-agent` services below. That costs you A2A
+# interop and step 10 of the verification checklist, and nothing else: no other
+# service here depends on either one.
 #
 # This is a single-host deployment with no TLS. Good for evaluating, for a
 # private mesh behind a firewall, and for a branch office. Before anyone outside
@@ -57,7 +104,7 @@ services:
       retries: 12
 
   services:
-    image: ghcr.io/jeffrschneider/agentmesh-services:${AGENTMESH_VERSION:-0.2.0}
+    image: ghcr.io/jeffrschneider/agentmesh-services:${AGENTMESH_VERSION:-0.2.1}
     depends_on:
       nats:
         condition: service_healthy
@@ -108,7 +155,7 @@ services:
       start_period: 30s
 
   console:
-    image: ghcr.io/jeffrschneider/agentmesh-console:${AGENTMESH_VERSION:-0.2.0}
+    image: ghcr.io/jeffrschneider/agentmesh-console:${AGENTMESH_VERSION:-0.2.1}
     depends_on:
       - services
     environment:
@@ -135,6 +182,114 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # The A2A eval agent. A stateless HTTP agent with one job: answer post-install
+  # validation with a value you can predict exactly, so "the bridge works" is a
+  # string comparison rather than a judgement call. It holds no credential, has
+  # no mesh connection and stores nothing; the bridge below attaches it and that
+  # is what puts it on the mesh.
+  #
+  # Declared before the bridge because the bridge depends on it. Attachment is
+  # attempted ONCE, at bridge startup: a bridge that boots first logs
+  # "failed to attach" and carries on without it, and nothing retries until the
+  # bridge is restarted. That is what the depends_on below is for.
+  eval-agent:
+    image: ghcr.io/jeffrschneider/agentmesh-eval-agent:${AGENTMESH_VERSION:-0.2.1}
+    environment:
+      PORT: "8091"
+      # Resolved by the BRIDGE, which fetches this URL out of the agent card —
+      # so unlike the console's two settings, a compose service name is the
+      # RIGHT value here and a host address is the wrong one.
+      PUBLIC_BASE_URL: http://eval-agent:8091
+      # Its own cap, per client address. The bridge's outbound limiter is
+      # per-attachment and says nothing about a second bridge or a curl loop, so
+      # the agent does not rely on it.
+      RATE_PER_MINUTE: ${EVAL_AGENT_RATE_PER_MINUTE:-60}
+    ports:
+      # Published so that a failing validation step can be split in one command:
+      # call the agent directly here, and if it answers, the fault is the bridge.
+      - "8091:8091"
+    restart: unless-stopped
+    healthcheck:
+      # /healthz is deliberately outside the agent's own rate limiter, so a probe
+      # every few seconds cannot exhaust the budget a real caller needs. Node
+      # makes the request itself: the image is Node on Alpine, with no curl.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8091/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # The A2A bridge. A mesh NODE that vouches for external A2A parties: inbound,
+  # a stock A2A client reaches mesh agents through it; outbound, an A2A server
+  # (the eval agent above) appears on the mesh as an ordinary agent.
+  #
+  # It fails closed. With BRIDGE_API_KEYS empty and BRIDGE_ALLOW_ANONYMOUS off —
+  # the defaults — it starts, says so in the log, and refuses every inbound call
+  # with 401. Set one of the two before the inbound direction does anything. See
+  # .env.example, which spells out what each of them opens.
+  bridge:
+    image: ghcr.io/jeffrschneider/agentmesh-bridge-a2a:${AGENTMESH_VERSION:-0.2.1}
+    depends_on:
+      nats:
+        condition: service_healthy
+      # register() is a request to the registry, so a bridge that starts before
+      # the services tier fails its attachment and does not retry.
+      services:
+        condition: service_healthy
+      eval-agent:
+        condition: service_healthy
+    environment:
+      # NEVER set MESH_URL, PORT or PUBLIC_BASE_URL to an empty string. The
+      # bridge reads exactly those three with `??`, which treats "" as a value
+      # rather than as an absence, so an empty one REPLACES the code default
+      # instead of falling back to it: `PORT: ""` becomes Number("") = 0 and the
+      # bridge binds whatever port the kernel hands out, on a published 8090
+      # nobody is listening on, and an empty PUBLIC_BASE_URL writes an empty
+      # address into every agent card the bridge generates. All three are set to
+      # real values here, and PUBLIC_BASE_URL uses `:-` so an empty
+      # PUBLIC_BRIDGE_URL in .env still yields the default. Keep both properties.
+      # Every other variable below is read with a truthy test, which is why
+      # API_KEYS and TRUSTED_PROXIES can safely default to nothing.
+      #
+      # The SDK speaks NATS over WebSocket, so this is 4443 and not 4222.
+      MESH_URL: ws://nats:4443
+      CREDS_FILE: /data/creds/bridge.creds
+      PORT: "8090"
+      # Goes into every agent card this bridge generates, so it is the address a
+      # remote A2A client will come back to — a real hostname once anything
+      # outside this host uses it.
+      PUBLIC_BASE_URL: ${PUBLIC_BRIDGE_URL:-http://localhost:8090}
+      API_KEYS: ${BRIDGE_API_KEYS:-}
+      ALLOW_ANONYMOUS: ${BRIDGE_ALLOW_ANONYMOUS:-}
+      # Empty means X-Forwarded-For is ignored and callers are identified by
+      # socket address, which is correct for a directly published port. Behind a
+      # reverse proxy it must name the proxy, or every caller on the internet
+      # shares one identity and one rate budget: the proxy's.
+      TRUSTED_PROXIES: ${BRIDGE_TRUSTED_PROXIES:-}
+      RATE_PER_MINUTE: ${BRIDGE_RATE_PER_MINUTE:-30}
+      # Outbound attachments, comma-separated. The eval agent is attached by
+      # default so that post-install validation has something deterministic to
+      # call. It registers PUBLIC deliberately: the bridge's inbound side refuses
+      # to expose an unlisted or private agent, so an unlisted eval agent is
+      # unreachable by exactly the check it exists to serve.
+      ATTACH: http://eval-agent:8091
+    volumes:
+      # Read-only, and only for bridge.creds. bootstrap.sh mints it on first run.
+      - mesh-data:/data:ro
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
+    healthcheck:
+      # 200 once the mesh connection is up, 503 before it — the bridge binds its
+      # port BEFORE connecting to the mesh, on purpose, so "listening" and
+      # "ready" are genuinely different states and this check reads the second.
+      # No curl in the image; node makes the request.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8090/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
 volumes:
   # Operator keys, account JWTs, credentials, server config. This is the one to
