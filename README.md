@@ -77,6 +77,38 @@ nothing sends anything, and silence looks exactly like health. A check from
 somewhere else — any uptime service, a cron on a different machine — is the only
 thing that covers that, and it is worth the two minutes.
 
+## Knowing when to upgrade
+
+Your deployment checks once an hour for published version and security advisories,
+and shows the result at the top of the operator console: whether a newer release
+exists, and whether anything filed affects the version you are on.
+
+It is a plain HTTPS GET for two small signed files on the public release bucket.
+**Nothing is registered and no record is kept.** You are not on a list, we do not
+learn that your mesh exists, and there is no email — the only thing that leaves your
+host is an ordinary request for a public URL, the same as fetching a package index.
+
+The files are signed and your deployment refuses anything it cannot verify. That
+matters more than it sounds: a channel operators trust is a good way to attack them,
+so a forged "critical hole, upgrade immediately" has to fail. The trust anchor is
+compiled into the release you already installed, not configured, so changing it
+requires shipping you a new release.
+
+If the feed cannot be fetched or has gone stale, the console says the status is
+**unknown**. It never reads as "up to date" — blocking the feed must not be a way to
+make every console show green.
+
+To switch it off entirely:
+
+```bash
+ADVISORY_CHECK=off
+```
+
+The console then reports advisory status as unknown, which is accurate: nothing is
+being checked. You can also point `AGENTMESH_RELEASES_BASE` and
+`AGENTMESH_ADVISORY_ROOT_KEY` at a feed of your own if you would rather publish
+advisories to your own fleet.
+
 ## Once it is running
 
 [docs/operator-handbook.md](docs/operator-handbook.md) —

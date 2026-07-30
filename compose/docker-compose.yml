@@ -128,6 +128,12 @@ services:
       # credentials; losing this one strands everything already sealed under it.
       #   openssl rand -hex 32 > ./hosted-agent.key
       HOSTED_AGENT_KEY_FILE: ${HOSTED_AGENT_KEY_FILE:-}
+      # Hourly check for published version and security advisories, shown in the
+      # operator console. A plain GET for two signed files on the public release
+      # bucket — nothing registers, no record is kept, no email. Set to "off" to
+      # stop the deployment reaching out at all; the console then reports advisory
+      # status as unknown, which is accurate rather than reassuring.
+      ADVISORY_CHECK: ${ADVISORY_CHECK:-on}
       # The operator console login. Leave the password unset and the container
       # invents one on first start and prints it in the log:
       #
