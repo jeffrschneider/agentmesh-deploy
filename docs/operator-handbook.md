@@ -629,6 +629,9 @@ process serving the API is perfectly fine. `/health` is public and deliberately
 thin (service, status, uptime, nothing about hosts, versions or pool sizes),
 because a status page is also reconnaissance.
 
+There is a browser version of the same three facts at `/status`, same reducer and
+same status code, for handing to someone who is not going to read JSON.
+
 Expect `{"ok":true,"nats":true,"pool":{"available":N,"issued":M},"uptime_s":…}`.
 It returns HTTP 503 when the NATS connection is closed, so a monitor can watch it
 directly. `ok` is literally "the connection is not closed", which means it proves

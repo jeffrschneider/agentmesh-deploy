@@ -58,8 +58,19 @@ It is a fine liveness probe for that one process and it cannot see the others, s
 service can be dead behind a green `/healthz`. If you monitor only one of the two,
 monitor `/health`.
 
-Both are public and deliberately thin — service, status, uptime, and nothing about
-hosts, versions or credential pools. A status page is also reconnaissance.
+For people rather than machines there is `/status` — open it in a browser. It reads
+the same heartbeats through the same reducer and returns the same 200 or 503, so it
+is the URL to give a user asking whether the mesh is down or their own code is. It
+is a separate route rather than `/health` changing shape based on the `Accept`
+header, because uptime checkers routinely send browser-like `Accept` headers and a
+health endpoint whose response type depends on a request header is a trap for
+whoever curls it next.
+
+All three are public and deliberately thin — service, status, uptime, and nothing
+about hosts, versions or credential pools. A status page is also reconnaissance.
+None of them will imply health they cannot see: if the heartbeats are unreadable,
+`/health` returns 503 and `/status` says so in words rather than drawing an empty
+board that reads as all-clear.
 
 And know what neither can tell you: if the host goes away, nothing answers and
 nothing sends anything, and silence looks exactly like health. A check from
