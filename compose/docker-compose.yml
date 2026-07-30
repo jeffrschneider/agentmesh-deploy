@@ -113,6 +113,21 @@ services:
       NATS_CREDS: /data/creds/services.creds
       CREDS_DIR: /data/creds/pool
       USAGE_DB_PATH: /var/lib/agentmesh/usage.db
+      # Where outage notices go. Unset, process health is still detected and
+      # logged and the log says the address is unset — so "no alerts configured"
+      # stays distinguishable from "no alerts happening". Needs RESEND_API_KEY to
+      # actually send; without it the alert is logged instead.
+      OPERATOR_ALERT_EMAIL: ${OPERATOR_ALERT_EMAIL:-}
+      # 32 random bytes (hex or base64) encrypting every secret the platform holds
+      # for a user: the per-account agent the browser rooms UI acts as, and the
+      # room key of any sealed room a member invites a web viewer into. Unset and
+      # those features answer 501 and say so, which is the right refusal — storing
+      # agent seeds unencrypted would be worse than not offering them.
+      #
+      # BACK THIS UP with your operator keys. Losing a signing key breaks new
+      # credentials; losing this one strands everything already sealed under it.
+      #   openssl rand -hex 32 > ./hosted-agent.key
+      HOSTED_AGENT_KEY_FILE: ${HOSTED_AGENT_KEY_FILE:-}
       # The operator console login. Leave the password unset and the container
       # invents one on first start and prints it in the log:
       #

@@ -66,6 +66,7 @@ this repository or at https://dev.agentmesh.ai.
   - [R15. Prove the deployment is behaving](#r15-prove-the-deployment-is-behaving)
   - [R16. Reclaim durable rooms when the quota is full](#r16-reclaim-durable-rooms-when-the-quota-is-full)
   - [R17. Confirm a refused handle rebinding](#r17-confirm-a-refused-handle-rebinding)
+  - [R18. A process is restarting over and over](#r18-a-process-is-restarting-over-and-over)
 - [5. Diagnosis](#5-diagnosis) — organised by symptom, because that is what you arrive with
   - [**5.1 The traps, first — read this before you trust any check below**](#51-the-traps-first)
   - [5.2 Agents are not answering](#52-agents-are-not-answering)
@@ -390,6 +391,27 @@ it keeps one config valid on any host — and it is also the single most common
 cause of "the deployment is up but the thing doesn't work". See
 [trap 4](#51-the-traps-first).
 
+Two of that family deserve naming, because both are easy to leave unset and each
+fails in a different way.
+
+**`HOSTED_AGENT_KEY_FILE`** — 32 random bytes (hex or base64), the AES-256-GCM key
+for every secret the platform holds on a user's behalf: hosted-agent seeds for the
+web rooms UI, and the room key of any sealed room a member has invited a web viewer
+into. Unset, those features answer 501 and say so, which is the intended refusal —
+storing agent seeds unencrypted would be worse than not offering the feature. Note
+the asymmetry with a signing key: losing a MINTING seed breaks new credentials,
+while losing this key strands every secret already sealed under it, because nothing
+can decrypt them. **Back it up with your account keys, not with your config.**
+
+```bash
+openssl rand -hex 32 > <CREDS_DIR>/hosted-agent.key && chmod 600 <CREDS_DIR>/hosted-agent.key
+```
+
+**`OPERATOR_ALERT_EMAIL`** — where outage notices go. Unset, process health is
+still detected and logged and the log says the address is unset, so "no alerts
+configured" stays distinguishable from "no alerts happening". Believing you are
+covered when you are not is the worst of the three states.
+
 **Cannot start without these:**
 
 | Path (VM) | Env var | Without it |
@@ -597,8 +619,15 @@ guest credential minted with the run of the account.
 **1. The broker is up and the services are connected to it.**
 
 ```bash
-curl -fsS $API/healthz
+curl -fsS $API/health      # every service, from the heartbeats — start here
+curl -fsS $API/healthz     # just the process that answers, plus pool detail
 ```
+
+Start with `/health`: it lists every expected service and returns 503 if any is
+missing, so it catches the case `/healthz` cannot — one service dead while the
+process serving the API is perfectly fine. `/health` is public and deliberately
+thin (service, status, uptime, nothing about hosts, versions or pool sizes),
+because a status page is also reconnaissance.
 
 Expect `{"ok":true,"nats":true,"pool":{"available":N,"issued":M},"uptime_s":…}`.
 It returns HTTP 503 when the NATS connection is closed, so a monitor can watch it
@@ -957,20 +986,54 @@ pm2 save
 Then, in every shape:
 
 ```bash
-sleep 10 && curl -fsS $API/healthz
+sleep 10 && curl -fsS $API/healthz     # this process
+curl -fsS $API/health                  # the whole deployment
 ```
 
-**Worked when:** `/healthz` returns `"ok":true` and the log ends with `All
-services ready.`
+**Worked when:** `/healthz` returns `"ok":true`, `/health` reports every service
+`up`, and the log ends with `All services ready.`
 
-Two rules for the pm2 shape. **Always name the ecosystem file.** Naming it is what
-re-reads it, and re-reading it is the only way a newly placed secret takes effect:
-the config reads its secret files when pm2 parses the config, so a file dropped
-into `<CREDS_DIR>` after boot is invisible until the config is parsed again. A
-bare `pm2 restart <app> --update-env`, with no config file named, is a different
-operation and is how a fleet was once taken down for four minutes — see
+The two are not the same check and the difference matters after a restart.
+`/healthz` answers from whichever process owns the API port, so it proves that one
+process is alive. `/health` reads a heartbeat from every process and reports each
+expected service, returning 503 if any is missing — which is the only one of the
+two that can tell you a SIBLING failed to come back up.
+
+Three rules for the pm2 shape. **Always name the ecosystem file.** Naming it is
+what re-reads it, and re-reading it is the only way a newly placed secret takes
+effect: the config reads its secret files when pm2 parses the config, so a file
+dropped into `<CREDS_DIR>` after boot is invisible until the config is parsed
+again. A bare `pm2 restart <app> --update-env`, with no config file named, is a
+different operation and is how a fleet was once taken down for four minutes — see
 [R3](#r3-restart-a-fleet-agent). And **do not use `sudo`**: pm2 is per-user, so
 `sudo pm2 list` reaches root's daemon, which does not own these apps.
+
+The third rule is the one that costs the most when it is not known.
+**`startOrRestart` does not change an app's exec settings.** It re-reads the
+config for the ENVIRONMENT, and restarts an already-registered app using the
+`script`, `interpreter`, `args`, `min_uptime` and restart policy pm2 recorded when
+the app was first added. So a change to any of those in the ecosystem file has no
+effect, for ever, however many times you deploy.
+
+That is not theoretical. On one deployment an A2A bridge was registered with
+`pm_exec_path: /usr/bin/node` and `args: ["tsx", "src/main.ts"]`, so it ran
+`node tsx src/main.ts` and died on `Cannot find module '.../tsx'` — **11,032
+times**. The ecosystem file said `script: "npx"` throughout, nothing was missing on
+the host, and every deploy dutifully restarted the broken invocation. To apply exec
+changes you have to replace the registration:
+
+```bash
+cd <INSTALL_ROOT>
+pm2 delete agentmesh-services            # drops pm2's stale record
+pm2 start ecosystem.config.cjs --only agentmesh-services
+pm2 save
+```
+
+A few seconds of downtime per app, which is the correct trade for a deploy that
+actually deploys. If your deployment splits services across several pm2 apps, do
+this for each in dependency order — whichever app carries the REGISTRY first, with
+time to come up, because an agent that registers into a registry that is not
+listening yet vanishes from discovery until it is restarted.
 
 In the container shapes the equivalent of "a newly placed secret" is a changed
 environment or a changed mounted Secret, and both need a restart or a rollout, not
@@ -1734,6 +1797,64 @@ While a handle is refused, senders using it fall back to a bare key, which is th
 messages are being held".
 
 ---
+
+### R18. A process is restarting over and over
+
+**Symptom.** A restart counter in the thousands, or an operator alert saying a
+process is looping or parked in restart backoff.
+
+**First, do not read the cumulative count as the incident.** A large total is
+history. What matters is whether it is still climbing:
+
+```bash
+pm2 jlist | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+  for (const p of JSON.parse(d)) console.log(p.name, p.pm2_env.status,
+    "restarts="+p.pm2_env.restart_time, "unstable="+p.pm2_env.unstable_restarts,
+    "uptime_s="+Math.round((Date.now()-p.pm2_env.pm_uptime)/1000));});'
+```
+
+Run it twice a minute apart. A total that does not move is an old scar.
+
+**Then read the error, not the status.** `status: online` with a two-second uptime
+is a process mid-loop, and pm2's own table will not tell you why:
+
+```bash
+tail -40 <LOG_DIR>/<app>-error.log
+```
+
+**The three causes worth knowing, in order of how often they happen.**
+
+*Something else holds the port.* `EADDRINUSE`. Two apps configured to serve the
+same port will alternate: whichever loses the race loops, and which one is serving
+depends on who last won. Find the holder and decide which app should exist:
+
+```bash
+sudo ss -ltnp | grep ':<PORT>'
+```
+
+*pm2's registration is wrong and no deploy can fix it.* `MODULE_NOT_FOUND` on a
+path that looks like an argument rather than a file (`Cannot find module
+'.../tsx'`) means pm2 is running the wrong `script`/`interpreter` combination.
+`startOrRestart` will not correct it — see [R1](#r1-restart-the-platform-services).
+Delete and start.
+
+*A dependency it needs is genuinely absent.* Check before assuming; in the case
+above, everything was installed and only the invocation was wrong.
+
+**Why it was allowed to reach thousands.** `max_restarts` alone does nothing: pm2
+counts only restarts that occur inside `min_uptime` toward the cap, so with
+`min_uptime` unset any process surviving a second resets the unstable counter and
+the cap is unreachable. Set both, and add backoff:
+
+```js
+min_uptime: 20000,
+max_restarts: 10,
+exp_backoff_restart_delay: 3000,   // pm2 uses this INSTEAD of restart_delay
+```
+
+**Worked when:** the process is `online` with an uptime that keeps growing, or it
+is `errored` and STOPPED — which is a fine outcome. A stopped process you can see
+beats a looping one nobody notices.
 
 ## 5. Diagnosis
 

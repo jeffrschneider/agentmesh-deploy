@@ -43,12 +43,35 @@ every client. Two of those decisions have no practical undo, and both are made t
 first time you run `bootstrap`: where the operator keystore backup lives, and which
 domain your agents' handles are anchored to.
 
+## Checking it is up
+
+```bash
+curl -fsS http://<host>:3001/health
+```
+
+`/health` is the deployment's health: it reports every service the deployment
+expects, reading a heartbeat each one writes, and returns 503 if any is missing.
+Point an uptime check at this.
+
+There is also `/healthz`, which answers from whichever process serves the API port.
+It is a fine liveness probe for that one process and it cannot see the others, so a
+service can be dead behind a green `/healthz`. If you monitor only one of the two,
+monitor `/health`.
+
+Both are public and deliberately thin — service, status, uptime, and nothing about
+hosts, versions or credential pools. A status page is also reconnaissance.
+
+And know what neither can tell you: if the host goes away, nothing answers and
+nothing sends anything, and silence looks exactly like health. A check from
+somewhere else — any uptime service, a cron on a different machine — is the only
+thing that covers that, and it is worth the two minutes.
+
 ## Once it is running
 
 [docs/operator-handbook.md](docs/operator-handbook.md) —
 <https://github.com/jeffrschneider/agentmesh-deploy/blob/main/docs/operator-handbook.md>
 
-The handbook for keeping a mesh alive and fixing it at 3am: seventeen runbooks, the
+The handbook for keeping a mesh alive and fixing it at 3am: eighteen runbooks, the
 standing obligations and where scheduled work actually runs, diagnosis organised by
 symptom rather than by task, every limit and the variable that changes it, and an
 explicit list of what it could not verify.
@@ -78,12 +101,22 @@ authority for them yourself: serve WebFinger for that domain and your answer
 outranks every registrar. How and why:
 <https://dev.agentmesh.ai/running-a-mesh.html#your-names>.
 
-## The one thing to back up
+## The two things to back up
 
 Whichever path you take, the operator keys are the mesh's identity. Lose them and
 every credential you have issued becomes unusable, permanently, because nothing
 can sign replacements that match. Both READMEs say where they live. Back that up
 before you have agents depending on it.
+
+The second is `HOSTED_AGENT_KEY_FILE`, if you enable the browser-facing rooms UI.
+It is 32 random bytes that encrypt every secret the platform holds for a user: the
+per-account agent the web UI acts as, and the room key of any end-to-end encrypted
+room a member has invited a web viewer into. The failure mode is different from the
+operator keys and worth understanding — losing a *signing* key breaks the issuing of
+NEW credentials, while losing this one strands everything already sealed under it,
+because nothing can decrypt it. Back it up with the operator keys, not with your
+configuration. Leave it unset and the feature refuses to run rather than storing
+those secrets in the clear, which is the intended behaviour if you do not want it.
 
 ## Reference
 
