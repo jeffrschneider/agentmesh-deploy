@@ -61,26 +61,19 @@ kubectl -n agentmesh port-forward svc/bridge 8090:8090 &
 Two more Deployments at the bottom of the manifest, both optional and neither
 depended on by anything else: delete them and the mesh is unaffected.
 
-**Both images have Dockerfiles and both are built by the AgentMesh release
-workflow, but neither has been pushed yet.** All four AgentMesh images publish
-together at `0.2.1` the first time a release is cut; `agentmesh-services` and
-`agentmesh-console` are on ghcr at `0.2.0` today and these two have never been
-pushed at all. `0.2.1` rather than `0.2.0` because the workflow builds all four
-from current `main` at whatever version it is given, so publishing the new pair
-at `0.2.0` would re-push the other two at `0.2.0` as well and replace published
-images with substantially different content under a version that already means
-something else. To apply this manifest before that release, build both from the
-AgentMesh repository **root** — `docker build -f eval-agent/Dockerfile -t
-<your-registry>/agentmesh-eval-agent:0.2.1 .` and the same shape for
-`bridge-a2a/Dockerfile` — push to a registry the cluster can pull from, and
-change the two `image:` lines.
+**All four AgentMesh images are built by one release workflow and published
+together on ghcr at the version this manifest pins.** To build one yourself
+instead, the build context is the AgentMesh repository **root** — `docker build
+-f eval-agent/Dockerfile -t <your-registry>/agentmesh-eval-agent:<version> .`
+and the same shape for `bridge-a2a/Dockerfile` — push to a registry the cluster
+can pull from, and change the `image:` lines.
 
 **A package's first publish lands private, and a private package is
 indistinguishable from a missing one.** A GitHub container registry package
 stays private until someone makes it public once, by hand, in that package's
 settings; until then an anonymous pull fails with a denied error and the pod
 sits in `ImagePullBackOff` looking exactly like a tag that was never published.
-Whoever cuts the first `0.2.1` release flips both new packages to public
+Whoever cuts a release that adds a NEW image flips that package to public
 afterwards. If you deliberately keep a package private, the cluster needs an
 `imagePullSecret` on the pod spec, which this manifest does not set.
 

@@ -56,9 +56,9 @@ source by relative path and so needs `sdk-typescript/` in the same context:
 
 ```
 docker build -f eval-agent/Dockerfile \
-  -t ghcr.io/jeffrschneider/agentmesh-eval-agent:0.2.1 .
+  -t ghcr.io/jeffrschneider/agentmesh-eval-agent:0.2.2 .
 docker build -f bridge-a2a/Dockerfile \
-  -t ghcr.io/jeffrschneider/agentmesh-bridge-a2a:0.2.1 .
+  -t ghcr.io/jeffrschneider/agentmesh-bridge-a2a:0.2.2 .
 ```
 
 For whoever cuts a release that adds a NEW image: **a package's first publish

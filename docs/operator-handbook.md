@@ -106,7 +106,7 @@ Fill these in once. Nothing below assumes any host but yours.
 | `<REGISTRAR>` | the registrar you point `PAN_REGISTRAR` at. Defaults to `https://naming.agentmesh.ai` | |
 | `<HANDLE>` | a handle on your mesh | `Coder.you@example.com` |
 | `<OPERATOR_EMAIL>` | the email address of an operator who owns room and agent quota | |
-| `<AGENTMESH_VERSION>` | the image tag you pinned. All four AgentMesh images carry one version. `0.2.0` is what is in the registry at the time of writing; both bundles here pin `0.2.1`, which publishes when the next release is cut ([1.1](#11-the-pieces)) | |
+| `<AGENTMESH_VERSION>` | the image tag you pinned. All four AgentMesh images carry one version, are published together, and both bundles pin the same one (`0.2.2` at the time of writing). Do not pin `0.2.1`: its services image cannot build the audit store's path inside the container and exits at boot ([5](#5-troubleshooting)) | |
 
 Two shell variables recur, so set them before you start reading:
 
@@ -231,7 +231,7 @@ unverified.
 | Registrar | Optional | Handles do not resolve through *your* registrar; agents are reachable by raw key, or by handle through whichever registrar `PAN_REGISTRAR` names (default `https://naming.agentmesh.ai`). |
 | Nodes / adapters | Required to be *useful* | A mesh with no nodes is a mesh with no agents. |
 | Fleet manager | Optional | Only relevant when one host runs several agents. The console's Fleet view 503s without `FLEET_MANAGER_URL` and its token file. |
-| Bridge (A2A) | Optional | No A2A interop: no stock A2A client can call a mesh agent, and no external A2A server appears on the mesh. Nothing else notices. Its image has a Dockerfile and is built by the release workflow, but is not in the registry until `0.2.1` is published ([1.1](#11-the-pieces)). |
+| Bridge (A2A) | Optional | No A2A interop: no stock A2A client can call a mesh agent, and no external A2A server appears on the mesh. Nothing else notices. Its image is built and published by the release workflow with the other three. |
 | A2A eval agent | Optional | Step 10 of [2.5](#25-verify-it-is-actually-working) has nothing deterministic to call, so the bridge is provable only against a real agent whose answer you have to judge. Pointless without the bridge. |
 | Postgres (history) | Optional | `METRICS_DB_URL` unset means no charts; the mesh is unaffected. |
 | Object storage (rooms drive) | Optional | `ROOMS_DRIVE_BACKEND` defaults to `nats`, which keeps artifacts in JetStream and needs nothing else. |
@@ -249,9 +249,8 @@ named volumes. `bootstrap` runs `nsc` once to mint the whole credential chain an
 write `/data/nats.conf`, then exits; `services` mounts that volume read-only. No
 TLS, no ingress, no registrar, no agents. Right for evaluating, for a private
 mesh behind a firewall, and for a branch office. The last two containers are the
-A2A pair, and two things about them are worth knowing before you `up`: their
-images are built but not yet pushed, so the pinned tag does not resolve until
-`0.2.1` is released ([1.1](#11-the-pieces)), and `bootstrap.sh` short-circuits on
+A2A pair, and one thing about them is worth knowing before you `up`:
+`bootstrap.sh` short-circuits on
 an existing install, so a mesh brought up before they were added has no
 `bridge.creds` and must mint one by hand — the command is in
 [`compose/README.md`](../compose/README.md#upgrading-an-existing-deployment).
@@ -1182,7 +1181,7 @@ next to new services.
 Both now have images, but a VM install of this shape already runs the services
 and the console from source under a process manager, so the pair goes there too
 rather than dragging a container runtime onto the host. (If you would rather run
-them as containers, the images publish at `0.2.1` — see
+them as containers, the images are published — see
 [1.1](#11-the-pieces).) `ecosystem.config.cjs` lives on the host and is not in
 this repository, so this is the block to add to it rather than a diff you can
 apply. Four things in it are load-bearing and the rest is ordinary.
@@ -2135,6 +2134,16 @@ is, the next thing in that list is where it died.
 - EACCES on the usage database — `USAGE_DB_PATH` points somewhere unwritable. In
   Kubernetes this is usually a fresh PersistentVolume mounting root-owned;
   `fsGroup: 1000` on the pod is the fix, and the manifest here already sets it.
+- EACCES (mkdir) on `/app/services/data` at boot — the `0.2.1` services image.
+  Its audit store defaulted into the image's own root-owned filesystem, an
+  upstream bug that stopped the container before anything served. Fixed in
+  `0.2.2`: every SQLite store (usage, audit, anchors, bureau, ledger, and the
+  rest) resolves its directory from `MESH_DATA_DIR`, falling back to the
+  directory of `USAGE_DB_PATH`, and each still honors its own `*_DB_PATH`
+  variable. Both bundles set `MESH_DATA_DIR=/var/lib/agentmesh` so everything
+  lands on the mounted volume. On `0.2.1` itself, setting
+  `AUDIT_DB_PATH=/var/lib/agentmesh/audit.db` is the workaround; upgrading the
+  pin is the fix.
 - `[sched] lease bucket unavailable: …` — JetStream is not answering. This is a
   warning, not fatal; the scheduler retries every tick, but no scheduled work
   happens meanwhile.
@@ -2349,20 +2358,21 @@ repeats both checks on every build. Separately, the bridge's attachment code has
 been shown to accept the eval agent's card and forward a real call over HTTP.
 
 What is still unproven: the bridge holding a mesh credential, the mesh leg of
-that call, and the pair running together in either bundle. Neither image has been
-pushed either, so a deployment at the pinned `0.2.1` cannot pull them until a
-release is cut ([1.1](#11-the-pieces)). Treat every A2A instruction in this
+that call, and the pair running together in either bundle. Both images are
+published now, which removes the pull failure but proves nothing about the mesh
+leg. Treat every A2A instruction in this
 handbook as reviewed rather than exercised, and expect the first real run to find
 something.
 
 **Whether the image you pulled refuses to start without mail.** The startup guard
 that refuses the console mailer under `NODE_ENV=production` landed in the services
 source *after* the `0.2.0` images were published, and the images set
-`NODE_ENV=production` themselves. So `0.2.0` starts fine with no mail key, and a
-later image will not. `0.2.1` is a later image — it is built from current `main` —
-so the first deployment that pins it should expect to configure mail or drop
-`NODE_ENV=production`, even though the same bundle at `0.2.0` did not. Read your
-boot log for the `[auth] email:` line rather than trusting either statement.
+`NODE_ENV=production` themselves. So `0.2.0` starts fine with no mail key and
+every later image will not. The bundles handle this: they set
+`NODE_ENV=development` and `MESH_DEV_MODE=1`, so sign-in links print into the
+services log, and setting `RESEND_API_KEY` plus `NODE_ENV=production` in `.env`
+moves a deployment to real mail. Read your boot log for the `[auth] email:`
+line rather than trusting either statement.
 
 **Self-hosted mail is configurable but unproven end to end.** `MESH_MAIL_FROM`
 and `MESH_CONSOLE_URL` are the two settings that used to be missing, and the
@@ -2456,9 +2466,8 @@ Do not read the absence of a certificate panel as the absence of a duty.
 
 **Version pins drift across documents.** This repository's Compose README names
 one adapter version in its example, `mesh-adapter-latest.txt` in the release
-bucket moves independently, and the image version the bundles pin (`0.2.1`) is
-deliberately ahead of the version in the registry (`0.2.0`) until a release is
-cut ([1.1](#11-the-pieces)). Trust the release pointer for the adapter and your
+bucket moves independently, and the registry usually holds more versions than
+any document names. Trust the release pointer for the adapter and your
 own pinned tag for the images; treat every version written into prose, including
 in this file, as a snapshot.
 

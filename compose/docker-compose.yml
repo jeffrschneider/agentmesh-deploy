@@ -77,7 +77,7 @@ services:
       retries: 12
 
   services:
-    image: ghcr.io/jeffrschneider/agentmesh-services:${AGENTMESH_VERSION:-0.2.1}
+    image: ghcr.io/jeffrschneider/agentmesh-services:${AGENTMESH_VERSION:-0.2.2}
     depends_on:
       nats:
         condition: service_healthy
@@ -86,6 +86,12 @@ services:
       NATS_CREDS: /data/creds/services.creds
       CREDS_DIR: /data/creds/pool
       USAGE_DB_PATH: /var/lib/agentmesh/usage.db
+      # Every SQLite store (usage, audit, anchors, bureau, ledger, ...) lives
+      # here, on the mounted volume. Before 0.2.2 the stores other than usage
+      # defaulted into the image's own filesystem, which the node user cannot
+      # write; the audit store was the first to hit it and it stopped the
+      # container at boot.
+      MESH_DATA_DIR: /var/lib/agentmesh
       # Where outage notices go. Unset, process health is still detected and
       # logged and the log says the address is unset — so "no alerts configured"
       # stays distinguishable from "no alerts happening". Needs RESEND_API_KEY to
@@ -159,7 +165,7 @@ services:
       start_period: 30s
 
   console:
-    image: ghcr.io/jeffrschneider/agentmesh-console:${AGENTMESH_VERSION:-0.2.1}
+    image: ghcr.io/jeffrschneider/agentmesh-console:${AGENTMESH_VERSION:-0.2.2}
     depends_on:
       - services
     environment:
@@ -198,7 +204,7 @@ services:
   # "failed to attach" and carries on without it, and nothing retries until the
   # bridge is restarted. That is what the depends_on below is for.
   eval-agent:
-    image: ghcr.io/jeffrschneider/agentmesh-eval-agent:${AGENTMESH_VERSION:-0.2.1}
+    image: ghcr.io/jeffrschneider/agentmesh-eval-agent:${AGENTMESH_VERSION:-0.2.2}
     environment:
       PORT: "8091"
       # Resolved by the BRIDGE, which fetches this URL out of the agent card —
@@ -233,7 +239,7 @@ services:
   # with 401. Set one of the two before the inbound direction does anything. See
   # .env.example, which spells out what each of them opens.
   bridge:
-    image: ghcr.io/jeffrschneider/agentmesh-bridge-a2a:${AGENTMESH_VERSION:-0.2.1}
+    image: ghcr.io/jeffrschneider/agentmesh-bridge-a2a:${AGENTMESH_VERSION:-0.2.2}
     depends_on:
       nats:
         condition: service_healthy

@@ -320,7 +320,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: services
-          image: ghcr.io/jeffrschneider/agentmesh-services:0.2.1
+          image: ghcr.io/jeffrschneider/agentmesh-services:0.2.2
           env:
             - name: NATS_URL
               value: nats://nats-client.agentmesh.svc.cluster.local:4222
@@ -330,6 +330,12 @@ spec:
               value: /creds/pool
             - name: USAGE_DB_PATH
               value: /var/lib/agentmesh/usage.db
+            # Every SQLite store (usage, audit, anchors, bureau, ledger, ...)
+            # lives here, on the mounted volume. Before 0.2.2 the stores other
+            # than usage defaulted into the image's own root-owned filesystem
+            # and the audit store stopped the container at boot.
+            - name: MESH_DATA_DIR
+              value: /var/lib/agentmesh
             # Sign-in mail. The image bakes NODE_ENV=production in, and in
             # production the services refuse to start without RESEND_API_KEY,
             # because the fallback mailer prints working sign-in links. This
@@ -413,7 +419,7 @@ spec:
     spec:
       containers:
         - name: console
-          image: ghcr.io/jeffrschneider/agentmesh-console:0.2.1
+          image: ghcr.io/jeffrschneider/agentmesh-console:0.2.2
           env:
             # Resolved by the BROWSER, so these are the addresses a user's
             # machine can reach, never in-cluster service names. Set them to
@@ -452,12 +458,11 @@ spec:
 # puts it on the mesh.
 #
 # The image has a Dockerfile (eval-agent/Dockerfile) and is built, smoke-tested
-# and pushed by the AgentMesh release workflow along with the other three. It
-# has not been pushed yet: it publishes at 0.2.1 the first time a release is
-# cut, and until then nothing answers at this tag. To run it before that, build
-# it yourself from the AgentMesh repository ROOT —
-# `docker build -f eval-agent/Dockerfile -t <your-registry>/agentmesh-eval-agent:0.2.1 .`
-# — push it somewhere the cluster can pull from, and change the image below.
+# and pushed by the AgentMesh release workflow along with the other three, and
+# is published on ghcr at the pinned version. To build it yourself, do so from
+# the AgentMesh repository ROOT:
+# `docker build -f eval-agent/Dockerfile -t <your-registry>/agentmesh-eval-agent:<version> .`
+# then push somewhere the cluster can pull from and change the image below.
 # Delete this Deployment and its Service if you do not want it.
 apiVersion: apps/v1
 kind: Deployment
@@ -476,7 +481,7 @@ spec:
     spec:
       containers:
         - name: eval-agent
-          image: ghcr.io/jeffrschneider/agentmesh-eval-agent:0.2.1
+          image: ghcr.io/jeffrschneider/agentmesh-eval-agent:0.2.2
           env:
             # Set explicitly rather than inherited from the image, so that this
             # and containerPort below cannot drift apart.
@@ -517,10 +522,9 @@ spec:
 # outbound, ATTACH puts the eval agent above on the mesh as an ordinary agent.
 #
 # The image has a Dockerfile (bridge-a2a/Dockerfile) and is built, smoke-tested
-# and pushed by the AgentMesh release workflow along with the other three. Like
-# the eval agent it has not been pushed yet: it publishes at 0.2.1 the first
-# time a release is cut. Build it yourself before then with
-# `docker build -f bridge-a2a/Dockerfile -t <your-registry>/agentmesh-bridge-a2a:0.2.1 .`
+# and pushed by the AgentMesh release workflow along with the other three, and
+# is published on ghcr at the pinned version. To build it yourself:
+# `docker build -f bridge-a2a/Dockerfile -t <your-registry>/agentmesh-bridge-a2a:<version> .`
 # from the repository ROOT — never from bridge-a2a/, which has no path to the
 # SDK source the bridge imports.
 #
@@ -543,7 +547,8 @@ spec:
 # A FIRST PUBLISH LANDS PRIVATE. A ghcr package is private until it is made
 # public once, by hand, in the package settings, and an anonymous pull of a
 # private package fails with a denied error indistinguishable from an image that
-# was never published. Expect it once per package when 0.2.1 is first cut; a
+# was never published. Expect it once per package when a release first adds a
+# NEW image; a
 # cluster pulling from a private package needs an imagePullSecret instead.
 apiVersion: apps/v1
 kind: Deployment
@@ -566,7 +571,7 @@ spec:
     spec:
       containers:
         - name: bridge
-          image: ghcr.io/jeffrschneider/agentmesh-bridge-a2a:0.2.1
+          image: ghcr.io/jeffrschneider/agentmesh-bridge-a2a:0.2.2
           env:
             # The SDK speaks NATS over WebSocket, so 4443 and not 4222.
             - name: MESH_URL
