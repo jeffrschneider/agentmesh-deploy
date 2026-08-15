@@ -118,6 +118,16 @@ services:
       # stays distinguishable from "no alerts happening". Needs RESEND_API_KEY to
       # actually send; without it the alert is logged instead.
       OPERATOR_ALERT_EMAIL: ${OPERATOR_ALERT_EMAIL:-}
+      # Sign-in mail. Set RESEND_API_KEY and account sign-in links go out as
+      # real email. Left unset, this bundle opts into dev mode instead: sign-in
+      # links print into this container's log, which on a single-host
+      # evaluation mesh is your own log. The image refuses the third state on
+      # purpose: production with no mailer would turn a missing key into
+      # sign-in links nobody can see. When this mesh stops being an evaluation,
+      # set RESEND_API_KEY and set NODE_ENV=production in .env.
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      NODE_ENV: ${NODE_ENV:-development}
+      MESH_DEV_MODE: ${MESH_DEV_MODE:-1}
       # 32 random bytes (hex or base64) encrypting every secret the platform holds
       # for a user: the per-account agent the browser rooms UI acts as, and the
       # room key of any sealed room a member invites a web viewer into. Unset and
