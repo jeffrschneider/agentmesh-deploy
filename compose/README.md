@@ -9,10 +9,6 @@ to generate by hand. On first run it mints its own operator keys, an account wit
 JetStream, a credential for the services, one for a first agent, one for the A2A
 bridge, and a small pool of sandbox credentials.
 
-One caveat before you run it: the version this bundle pins, `0.2.1`, has not
-been released yet, so that command currently fails to pull. [The four
-images](#the-four-images) says why, and what to do until it has.
-
 Then:
 
 ```
@@ -51,24 +47,12 @@ Dockerfiles in the AgentMesh repository and are built, smoke-tested and pushed
 together by one release workflow, under one version. Nothing here needs building
 by hand as a matter of course.
 
-**What has not happened yet is the push.** `agentmesh-services` and
-`agentmesh-console` are on ghcr at `0.2.0`; the eval agent and the bridge have
-never been pushed at all. All four publish at `0.2.1` when a release is cut, and
-until that release runs `docker compose up -d` fails to pull at the pinned
-version. That is the pin behaving correctly, not a broken bundle.
+All four are published on ghcr at the pinned version, publicly, so
+`docker compose up -d` pulls them anonymously.
 
-`0.2.1` rather than `0.2.0` on purpose. The workflow builds all four images from
-current `main` at whatever version it is handed, so publishing the two new images
-at `0.2.0` would rebuild and re-push `agentmesh-services:0.2.0` and
-`agentmesh-console:0.2.0` as well, silently replacing already-published images
-with substantially different content. One version would then name two different
-builds. A new patch version costs nothing and avoids it.
-
-To run the bundle before that release you have to build the two missing images
-yourself, which needs the AgentMesh source — so if you do not have it, waiting
-for the release is the path. The build context is the repository **root** in both
-cases, never the component directory, because the bridge imports the SDK's source
-by relative path and so needs `sdk-typescript/` in the same context:
+If you rebuild any of them from source, the build context is the repository
+**root**, never the component directory, because the bridge imports the SDK's
+source by relative path and so needs `sdk-typescript/` in the same context:
 
 ```
 docker build -f eval-agent/Dockerfile \
@@ -77,16 +61,14 @@ docker build -f bridge-a2a/Dockerfile \
   -t ghcr.io/jeffrschneider/agentmesh-bridge-a2a:0.2.1 .
 ```
 
-**A package's first publish lands private, and the failure looks identical to
-never having published it.** A GitHub container registry package is private
-until someone makes it public once, by hand, in that package's settings. An
-anonymous `docker pull` of a private package fails with a denied error, which an
-operator cannot tell apart from an image that does not exist. Whoever cuts the
-first `0.2.1` release has to flip both new packages to public afterwards; it
-bites exactly once per package and never again.
+For whoever cuts a release that adds a NEW image: **a package's first publish
+lands private, and the failure looks identical to never having published it.**
+An anonymous pull of a private ghcr package fails with a denied error, so flip
+the new package to public once, by hand, in its package settings. It bites
+exactly once per package and never again.
 
-The alternative to all of this is to delete the `bridge` and `eval-agent`
-services from `docker-compose.yml`. That costs A2A interop and one step of the
+A smaller bundle is also fine: delete the `bridge` and `eval-agent` services
+from `docker-compose.yml`. That costs A2A interop and one step of the
 verification checklist, and nothing else: no other service depends on either.
 
 ## The A2A bridge

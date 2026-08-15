@@ -330,6 +330,17 @@ spec:
               value: /creds/pool
             - name: USAGE_DB_PATH
               value: /var/lib/agentmesh/usage.db
+            # Sign-in mail. The image bakes NODE_ENV=production in, and in
+            # production the services refuse to start without RESEND_API_KEY,
+            # because the fallback mailer prints working sign-in links. This
+            # bundle opts into dev mode instead: links print into the services
+            # log, which on your own cluster is your own log. For real email,
+            # set RESEND_API_KEY from a Secret, set NODE_ENV to production,
+            # and drop MESH_DEV_MODE.
+            - name: NODE_ENV
+              value: development
+            - name: MESH_DEV_MODE
+              value: "1"
             - name: MESH_OPERATOR_AUTH_FILE
               value: /var/lib/agentmesh/operator-auth.json
             - name: MESH_OPERATOR_ID

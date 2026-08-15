@@ -194,26 +194,16 @@ that is what puts it there. Its answer is a fixed transform of its input, so the
 expected reply is known before the call is made and "the bridge works" is a
 string comparison. Optional, and pointless without the bridge.
 
-**All four images are built by one release workflow, and two of them have not
-been pushed yet.** `agentmesh-services`, `agentmesh-console`,
+**All four images are built by one release workflow and are published on ghcr
+at the pinned version.** `agentmesh-services`, `agentmesh-console`,
 `agentmesh-eval-agent` and `agentmesh-bridge-a2a` each have a Dockerfile in the
-AgentMesh repository, and the release workflow builds, smoke-tests and pushes all
-four together under a single version. What is in the registry at the time of
-writing is `agentmesh-services:0.2.0` and `agentmesh-console:0.2.0`; the eval
-agent and the bridge have never been pushed at all. Both bundles here pin
-`0.2.1`, which is the version all four publish as the next time a release is
-cut — so until that release, `docker compose up -d` and `kubectl apply` fail to
-pull, and an operator either builds the two missing images by hand (`docker build
--f eval-agent/Dockerfile -t <your-registry>/agentmesh-eval-agent:<AGENTMESH_VERSION> .`
-from the repository **root**, and the same shape for `bridge-a2a/Dockerfile`) or
-deletes those two services.
-
-The version moved to `0.2.1` rather than staying at `0.2.0` because the workflow
-builds every image from current `main` at whatever version it is handed:
-publishing the new pair at `0.2.0` would rebuild and re-push the services and the
-console at `0.2.0` too, replacing already-published images with substantially
-different content under a version that already names something else. One version
-naming two different builds is worth a patch bump to avoid.
+AgentMesh repository, and the release workflow builds, smoke-tests and pushes
+all four together under a single version, which both bundles here pin. To build
+one by hand instead, the context is the repository **root**, never the
+component directory (`docker build -f eval-agent/Dockerfile
+-t <your-registry>/agentmesh-eval-agent:<AGENTMESH_VERSION> .`, and the same
+shape for `bridge-a2a/Dockerfile`), because the bridge imports the SDK's source
+by relative path.
 
 **A package's first publish lands private, and that failure is indistinguishable
 from never having published it.** A GitHub container registry package stays
@@ -221,12 +211,12 @@ private until someone makes it public once, by hand, in that package's own
 settings. An anonymous pull of a private package returns a denied error, so the
 operator sees Compose failing to pull or a pod in `ImagePullBackOff` — exactly
 what a tag that does not exist looks like. It bites once per package and never
-again. Whoever cuts the first release that publishes the eval agent and the
-bridge has to flip both new packages to public afterwards; and anyone debugging a
-pull failure at a version that was definitely released should check package
-visibility before suspecting anything else. A package you keep private on purpose
-needs registry credentials on the puller instead — an `imagePullSecret` in
-Kubernetes, `docker login` for Compose — and neither bundle configures one.
+again. Whoever cuts a release that adds a NEW image has to flip that package to
+public afterwards; and anyone debugging a pull failure at a version that was
+definitely released should check package visibility before suspecting anything
+else. A package you keep private on purpose needs registry credentials on the
+puller instead — an `imagePullSecret` in Kubernetes, `docker login` for Compose
+— and neither bundle configures one.
 
 [Section 8](#8-where-this-handbook-is-uncertain) records what all of this leaves
 unverified.

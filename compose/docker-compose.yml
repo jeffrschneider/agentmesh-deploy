@@ -14,48 +14,21 @@
 #                                        BRIDGE_API_KEYS — see .env.example)
 #   eval agent  http://localhost:8091   (what post-install validation calls)
 #
-# ALL FOUR IMAGES HAVE DOCKERFILES AND ARE BUILT BY ONE RELEASE WORKFLOW in the
-# AgentMesh repository, which builds, smoke-tests and pushes them together under
-# a single version. Nothing here has to be built by hand any more.
+# ALL FOUR IMAGES are built, smoke-tested and pushed together by one release
+# workflow in the AgentMesh repository, under one version, and all four are
+# published on ghcr at the pinned version. Nothing here is built by hand.
 #
-# What has NOT happened yet is the push. agentmesh-services and
-# agentmesh-console are on ghcr at 0.2.0; agentmesh-eval-agent and
-# agentmesh-bridge-a2a have never been pushed at all. All four publish at 0.2.1
-# when a release is cut, and until that release runs `docker compose up -d`
-# fails to pull at this pin. That is the pin doing its job, not a broken bundle.
+# If you rebuild the bridge image yourself, two things to know. The build
+# context is the repository ROOT, never the component directory: the services
+# and the bridge import the SDK's source by relative path, so sdk-typescript/
+# must be in the context. And the bridge is NOT compiled: it runs
+# `node --import tsx src/main.ts`, so tsx is a RUNTIME dependency despite
+# living in devDependencies, and `npm ci --omit=dev` alone produces an image
+# that builds green and dies on its first line with `Cannot find package 'tsx'`.
 #
-# 0.2.1 rather than 0.2.0 deliberately. The workflow builds all four from
-# current main at whatever version it is handed, so publishing the two new
-# images at 0.2.0 would rebuild and re-push services and console at 0.2.0 too,
-# silently replacing already-published images with substantially different
-# content. One version would then name two different builds. A new patch
-# version costs nothing and avoids it.
-#
-# To run before the release, build them yourself. The context is the repository
-# ROOT for every one of these, never the component directory — the services and
-# the bridge import the SDK's source by relative path, so they need
-# sdk-typescript/ in the same context:
-#
-#   docker build -f eval-agent/Dockerfile \
-#     -t ghcr.io/jeffrschneider/agentmesh-eval-agent:0.2.1 .
-#   docker build -f bridge-a2a/Dockerfile \
-#     -t ghcr.io/jeffrschneider/agentmesh-bridge-a2a:0.2.1 .
-#
-# If you adapt the bridge's Dockerfile, know that the bridge is NOT compiled: it
-# runs `node --import tsx src/main.ts`, because it imports the SDK by relative
-# source path. tsx is therefore a RUNTIME dependency despite living in
-# devDependencies, and `npm ci --omit=dev` on its own produces an image that
-# builds green and then dies on its first line with `Cannot find package 'tsx'`.
-#
-# A FIRST PUBLISH LANDS PRIVATE. A ghcr package is private until someone makes
-# it public once, by hand, in the package settings, and an anonymous pull of a
-# private package fails with a denied error that is indistinguishable from an
-# image that was never published. It bites once per package and never again, so
-# expect it for these two the first time 0.2.1 is cut.
-#
-# Or delete the `bridge` and `eval-agent` services below. That costs you A2A
-# interop and step 10 of the verification checklist, and nothing else: no other
-# service here depends on either one.
+# The bridge and eval-agent services below can be deleted if you want a
+# smaller bundle. That costs you A2A interop and step 10 of the verification
+# checklist, and nothing else: no other service here depends on either one.
 #
 # This is a single-host deployment with no TLS. Good for evaluating, for a
 # private mesh behind a firewall, and for a branch office. Before anyone outside
