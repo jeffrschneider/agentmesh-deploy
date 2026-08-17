@@ -1,71 +1,75 @@
 #!/bin/sh
-# First-run bootstrap for a self-hosted mesh: mint the operator -> account ->
-# user chain and write a server config.
+# First-run bootstrap for a self-hosted mesh: mint the operator -> account
+# chain and write a server config. USER credentials are no longer minted here
+# — the `mint` service (the services image's `mint-bootstrap` entrypoint)
+# mints them from the platform's own least-privilege templates, signed by the
+# account key this script leaves on the volume. This script's job ends at the
+# account boundary on purpose: `nsc add user` with no permission flags mints
+# an UNRESTRICTED credential (an empty permissions block inherits the
+# account's defaults), which is exactly the mistake this split removes.
 #
 # Runs inside nats-box, which ships nsc, so the bundle needs no tooling on the
-# host and nothing from the AgentMesh repository. `agentmesh init` does the same
-# thing on a workstation; this exists because that CLI is not published, and a
-# deployment recipe should not depend on a tool the reader cannot get.
+# host and nothing from the AgentMesh repository.
 #
-# Idempotent: if the config is already there, this exits without touching
-# anything. Deleting the volume is what starts over, and starting over means new
-# keys and therefore new credentials for every agent.
-#
-# The consequence of that short-circuit, for anything ADDED to this script
-# later: an existing deployment never runs the new lines. `bridge.creds` below
-# is the current example — a mesh bootstrapped before it was added has no such
-# file, and the bridge container will crash-loop on the missing path until the
-# credential is minted by hand. The README's "Upgrading an existing deployment"
-# section has the one command that does it.
+# Idempotent: if the config is already there, only the mint hand-off below
+# runs — it is the one part an EXISTING deployment needs on upgrade, because
+# a mesh bootstrapped before the mint split has no exported signing key and
+# the mint container cannot sign without it. Deleting the volume is what
+# starts over, and starting over means new keys and therefore new credentials
+# for every agent.
 set -eu
 
 DATA=/data
 NAME="${MESH_NAME:-agentmesh}"
 WS_PORT="${MESH_WS_PORT:-4443}"
 ACCT=agents
-POOL_SIZE="${SANDBOX_POOL_SIZE:-5}"
+
+N="nsc -H $DATA/.nsc"
+
+# ── the mint hand-off ───────────────────────────────────────────────────────
+# Export the account's signing seed and public key where the `mint` container
+# and the services can reach them: the seed signs user JWTs (the mint, the
+# /v1/bootstrap door, pool rotation), the public key is the issuer the
+# services advertise. Same volume, same trust boundary as the keystore the
+# seed already lives in; a real deployment hands these in as secrets instead,
+# exactly like the credentials themselves (see the chmod note below).
+#
+# Runs on EVERY boot, not only the first — this is the "new lines never run"
+# hazard the old header warned about, handled for the one addition that
+# upgrades need.
+export_mint_material() {
+  [ -d "$DATA/.nsc" ] || return 0
+  ACCT_PUB=$($N describe account -n "$ACCT" --field sub 2>/dev/null | tr -d '"') || return 0
+  [ -n "$ACCT_PUB" ] || return 0
+  mkdir -p "$DATA/creds"
+  if [ ! -f "$DATA/creds/mint-signing.nk" ]; then
+    SEED_FILE=$(find "$DATA/.nsc" -name "$ACCT_PUB.nk" | head -n 1)
+    if [ -n "$SEED_FILE" ]; then
+      cp "$SEED_FILE" "$DATA/creds/mint-signing.nk"
+      echo "[bootstrap] account signing key exported for the mint container"
+    else
+      echo "[bootstrap] WARNING: account key $ACCT_PUB not in the keystore — the mint container cannot sign"
+    fi
+  fi
+  printf '%s' "$ACCT_PUB" > "$DATA/creds/mint-issuer.txt"
+  chmod a+rX "$DATA/creds" 2>/dev/null || true
+  chmod a+r "$DATA/creds/mint-signing.nk" "$DATA/creds/mint-issuer.txt" 2>/dev/null || true
+}
 
 if [ -f "$DATA/nats.conf" ]; then
-  echo "[bootstrap] $DATA/nats.conf exists; nothing to do"
+  echo "[bootstrap] $DATA/nats.conf exists; checking the mint hand-off only"
+  export_mint_material
   exit 0
 fi
 
 echo "[bootstrap] minting a new operator. These keys ARE this mesh's identity."
-mkdir -p "$DATA/creds/pool" "$DATA/.nsc"
-N="nsc -H $DATA/.nsc"
+mkdir -p "$DATA/creds" "$DATA/.nsc"
 
 $N add operator -n "$NAME" --sys >/dev/null
 $N add account -n "$ACCT" >/dev/null
 # Unlimited JetStream for the account: the server's own limits are the real cap.
 $N edit account -n "$ACCT" \
   --js-mem-storage -1 --js-disk-storage -1 --js-streams -1 --js-consumer -1 >/dev/null
-
-# The services' own credential.
-$N add user -a "$ACCT" -n services >/dev/null
-$N generate creds -a "$ACCT" -n services > "$DATA/creds/services.creds"
-
-# One credential for a first agent, so there is something to connect with.
-$N add user -a "$ACCT" -n node-1 >/dev/null
-$N generate creds -a "$ACCT" -n node-1 > "$DATA/creds/node-1.creds"
-
-# The A2A bridge's own credential. The bridge is a mesh NODE, not an agent: it
-# holds one credential and vouches for every external A2A party it bridges, in
-# both directions. Its own credential rather than the services' one, so that
-# what the bridge did is distinguishable from what the platform did, and so that
-# revoking the bridge does not take the mesh down with it.
-$N add user -a "$ACCT" -n bridge >/dev/null
-$N generate creds -a "$ACCT" -n bridge > "$DATA/creds/bridge.creds"
-
-# Sandbox pool: the api service hands these out to guests. Without a pool it
-# still runs and reports zero available, which is a working mesh with guest
-# access switched off.
-i=1
-while [ "$i" -le "$POOL_SIZE" ]; do
-  $N add user -a "$ACCT" -n "guest-$i" >/dev/null
-  $N generate creds -a "$ACCT" -n "guest-$i" > "$DATA/creds/pool/guest-$i.creds"
-  i=$((i + 1))
-done
-echo "[bootstrap] sandbox pool: $POOL_SIZE credentials"
 
 # Operator + account JWTs for the server, memory resolver: accounts live in the
 # config file, so adding one later means editing this and restarting. Fine for a
@@ -99,10 +103,13 @@ websocket {
 include "accounts.conf"
 EOF
 
+export_mint_material
+
 # The services run as an unprivileged user in their own container and have to be
 # able to read these. Dev-bundle permissions; a real deployment should hand them
 # in as secrets instead.
 chmod -R a+rX "$DATA/creds" "$DATA/accounts.conf" "$DATA/nats.conf"
 
-echo "[bootstrap] done. Operator keys are in the mesh-data volume under .nsc"
+echo "[bootstrap] done. User credentials are minted next, by the mint service."
+echo "[bootstrap] Operator keys are in the mesh-data volume under .nsc"
 echo "[bootstrap] BACK THAT UP: losing it means you cannot mint credentials again."

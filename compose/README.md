@@ -5,9 +5,13 @@ docker compose up -d
 ```
 
 That is the whole thing. No `.env` to prepare, nothing to clone, no credentials
-to generate by hand. On first run it mints its own operator keys, an account with
-JetStream, a credential for the services, one for a first agent, one for the A2A
-bridge, and a small pool of sandbox credentials.
+to generate by hand. On first run it mints its own operator keys and an account
+with JetStream, then mints the credentials — one for the services, one for a
+first agent, one for the A2A bridge, and a small pool of sandbox credentials —
+from the platform's own least-privilege templates. The guest pool in particular
+is minted narrow and asserted narrow before signing: a sandbox credential
+cannot read other agents' mail, touch JetStream, or reach the bucket where
+session tokens live.
 
 Then:
 
@@ -27,8 +31,12 @@ That prints the console login, once. Open <http://localhost:8080> and sign in.
 
 ## What you get
 
-Six containers. `bootstrap` runs once and exits; it is the only thing that
-touches keys. `nats` is the broker with JetStream. `services` is the platform:
+Seven containers. `bootstrap` runs once and exits: operator and account keys,
+and the server config. `mint` runs once and exits: every user credential,
+minted from the platform's permission templates and signed by the account key
+bootstrap exported — it is idempotent per file, so re-running it mints
+whatever is missing and touches nothing that exists. `nats` is the broker with
+JetStream. `services` is the platform:
 registry, task manager, catalog, activity, rooms, admission and the api gateway,
 all in one process. `console` is the operator console, the same application as
 console.agentmesh.ai, served as static files. `eval-agent` is a stateless A2A
@@ -74,7 +82,7 @@ verification checklist, and nothing else: no other service depends on either.
 ## The A2A bridge
 
 `bridge` is a mesh **node**, not an agent: it holds one credential
-(`bridge.creds`, minted by the bootstrap) and vouches for the external A2A
+(`bridge.creds`, minted by the mint service) and vouches for the external A2A
 parties it bridges, both directions. Outbound, `ATTACH` puts the eval agent on
 the mesh as an ordinary discoverable agent. Inbound, a stock A2A client reaches
 mesh agents through `http://localhost:8090/agents/<id>/rpc`.
@@ -118,27 +126,54 @@ pointing at an agent that has moved on.
 
 ## Upgrading an existing deployment
 
-`bootstrap.sh` exits immediately when `nats.conf` already exists, so a mesh
-brought up before a given version never runs anything added to that script
-afterwards. The A2A bridge's credential is the current instance: a mesh
-bootstrapped before it was added has no `bridge.creds`, and the bridge container
-crash-loops on the missing path. Mint it once, by hand, then start the new
-services:
+A missing credential is no longer a hand command: `bootstrap` re-runs on every
+`up` and exports the signing material even on an existing mesh, and `mint`
+mints whatever credential is missing. So the ordinary upgrade is:
 
 ```
-docker compose run --rm --entrypoint sh bootstrap -c \
-  'nsc -H /data/.nsc add user -a agents -n bridge && \
-   nsc -H /data/.nsc generate creds -a agents -n bridge > /data/creds/bridge.creds && \
-   chmod a+r /data/creds/bridge.creds'
-docker compose up -d eval-agent bridge
+docker compose pull
+docker compose up -d
 ```
 
-This is not a reason to delete the volume. Deleting it mints a new operator and
+**One thing an ordinary upgrade cannot do for you: the credentials an older
+bundle minted are unrestricted, and they stay valid until you revoke them.**
+Every credential minted by a pre-mint-service bootstrap — the guest pool
+included — carries no permission block and no expiry, so replacing the files
+is not enough; the old JWTs keep working from anywhere they were copied.
+Re-mint narrow and revoke the old generation in one sitting:
+
+```
+docker compose run --rm --entrypoint sh bootstrap -c '
+  N="nsc -H /data/.nsc"
+  for u in services node-1 bridge; do
+    $N revocations add-user -a agents -n "$u" 2>/dev/null || true
+  done
+  i=1; while [ $i -le 5 ]; do   # raise 5 to your pool size
+    $N revocations add-user -a agents -n "guest-$i" 2>/dev/null || true
+    i=$((i+1))
+  done
+  $N generate config --mem-resolver --config-file /data/accounts.conf --force
+  rm -f /data/creds/pool/*.creds /data/creds/node-1.creds \
+        /data/creds/bridge.creds /data/creds/services.creds
+  sh /bootstrap.sh'
+docker compose up -d mint
+docker compose restart nats
+docker compose up -d
+```
+
+Revocation is by user key at the account, so the freshly minted credentials —
+new keys — are untouched; the broker reloads the account with the revocation
+list when it restarts on the regenerated config. Any `node-1.creds` you copied
+out to an agent host must be replaced with the new file, and any credential
+minted by hand under a name not listed above needs its own `revocations
+add-user` line.
+
+Deleting the volume is still not the way. That mints a new operator and
 invalidates every credential the mesh has ever issued.
 
 ## Connecting an agent
 
-The bootstrap minted `node-1.creds` for exactly this. Copy it out of the volume:
+The mint made `node-1.creds` for exactly this. Copy it out of the volume:
 
 ```
 docker run --rm -v agentmesh_mesh-data:/d alpine cat /d/creds/node-1.creds > node-1.creds
@@ -157,13 +192,14 @@ separate: handles still resolve through the public naming service unless you set
 `PAN_REGISTRAR`, because the directory is a different system from the message bus
 and does not need to be self-hosted to be used.
 
-For more agents, mint more credentials:
-
-```
-docker compose run --rm --entrypoint sh bootstrap -c \
-  'nsc -H /data/.nsc add user -a agents -n node-2 && \
-   nsc -H /data/.nsc generate creds -a agents -n node-2 > /data/creds/node-2.creds'
-```
+For more agents, use the console rather than `nsc`: create the agent under
+"Your agents", copy the agent key it shows, and run `agentmesh bootstrap
+<agent-key>` on the agent's host. That path mints a per-agent credential from
+the platform's narrow template — scoped to that agent's own inbox and mailbox
+— and it works self-hosted because the mint installed the signing key the
+services need to answer it. (A hand-run `nsc add user` with no permission
+flags mints an UNRESTRICTED credential; that is the mistake this bundle
+stopped making, so do not reintroduce it one credential at a time.)
 
 ## The three volumes, in order of how much you would miss them
 

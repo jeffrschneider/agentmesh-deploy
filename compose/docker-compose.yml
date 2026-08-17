@@ -39,8 +39,11 @@
 name: agentmesh
 
 services:
-  # Mints the operator -> account -> user chain on first run, then exits. Later
-  # starts find the config already there and do nothing.
+  # Mints the operator -> account chain and the server config on first run,
+  # then exits. Later starts find the config already there and only re-export
+  # the signing material the mint below needs. USER credentials are not minted
+  # here: `nsc add user` with no permission flags is an unrestricted
+  # credential, which is why that job moved to the mint service.
   bootstrap:
     image: natsio/nats-box:0.14.5
     volumes:
@@ -49,8 +52,31 @@ services:
     environment:
       MESH_NAME: ${MESH_NAME:-agentmesh}
       MESH_WS_PORT: "4443"
-      SANDBOX_POOL_SIZE: ${SANDBOX_POOL_SIZE:-5}
     entrypoint: ["sh", "/bootstrap.sh"]
+    restart: "no"
+
+  # The credential mint: a one-shot run of the services image that mints
+  # services, node-1, bridge and the guest pool from the platform's own
+  # least-privilege templates, signed by the account key bootstrap exported.
+  # The pool is asserted narrow before signing; node-1 and bridge are fenced
+  # off the session-token bucket, server monitoring and the federation plane.
+  # Idempotent PER FILE: a credential that exists is never touched, and one
+  # that is missing is minted — so an upgrade gains new credentials without
+  # hand commands, and re-minting a wide pool is
+  # `docker run --rm -v agentmesh_mesh-data:/d alpine rm /d/creds/pool/*.creds`
+  # followed by `docker compose up mint`.
+  mint:
+    image: ghcr.io/jeffrschneider/agentmesh-services:${AGENTMESH_VERSION:-0.2.2}
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    command: ["mint-bootstrap"]
+    environment:
+      SANDBOX_POOL_SIZE: ${SANDBOX_POOL_SIZE:-5}
+    volumes:
+      # The one writer of /data/creds besides bootstrap itself; everything
+      # that only READS credentials mounts the volume :ro.
+      - mesh-data:/data
     restart: "no"
 
   nats:
@@ -81,10 +107,19 @@ services:
     depends_on:
       nats:
         condition: service_healthy
+      mint:
+        condition: service_completed_successfully
     environment:
       NATS_URL: nats://nats:4222
       NATS_CREDS: /data/creds/services.creds
       CREDS_DIR: /data/creds/pool
+      # The account signing key the mint exported. It is what lets this
+      # deployment answer /v1/bootstrap (per-agent credentials, narrow by
+      # construction — the path a console-minted agent key redeems through)
+      # and rotate the guest pool. The issuer account is read off the volume
+      # by the entrypoint; setting ROOMS_MINT_ISSUER_ACCOUNT here overrides it.
+      ROOMS_MINT_SEED_FILE: /data/creds/mint-signing.nk
+      POOL_SIGNING_SEED_FILE: /data/creds/mint-signing.nk
       USAGE_DB_PATH: /var/lib/agentmesh/usage.db
       # Every SQLite store (usage, audit, anchors, bureau, ledger, ...) lives
       # here, on the mounted volume. Before 0.2.2 the stores other than usage
@@ -243,6 +278,8 @@ services:
     depends_on:
       nats:
         condition: service_healthy
+      mint:
+        condition: service_completed_successfully
       # register() is a request to the registry, so a bridge that starts before
       # the services tier fails its attachment and does not retry.
       services:
@@ -285,7 +322,7 @@ services:
       # unreachable by exactly the check it exists to serve.
       ATTACH: http://eval-agent:8091
     volumes:
-      # Read-only, and only for bridge.creds. bootstrap.sh mints it on first run.
+      # Read-only, and only for bridge.creds. The mint service mints it.
       - mesh-data:/data:ro
     ports:
       - "8090:8090"
