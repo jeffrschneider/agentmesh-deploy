@@ -598,12 +598,23 @@ deployment recipe should not depend on a tool the reader cannot get.
 
 Do these in order. Each one rules out a layer.
 
-A programmatic `mesh doctor` that performs this whole list, including the two
-refusal checks at the end, is planned and will replace the manual steps. Until it
-ships, this checklist is the tool, and steps 7 and 8 are the ones people skip
-because they test for a refusal rather than a success. Do not skip them: they are
-the only steps here that can catch a broker running with authentication off, or a
-guest credential minted with the run of the account.
+Steps 7 and 8 are the ones people skip, because they test for a refusal rather
+than a success. Do not skip them: they are the only steps here that can catch a
+broker running with authentication off, or a guest credential minted with the
+run of the account. The adapter now runs the unskippable half of this list for
+you — `mesh-adapter doctor` performs steps 1, 3 and 4 and both refusal checks
+(7 and 8), rides out the async-denial trap correctly, and exits nonzero unless
+every check it ran got a positive answer:
+
+```bash
+MESH_URL=ws://<MESH_HOST>:4443 MESH_GUEST_URL=$API/v1/guest mesh-adapter doctor
+```
+
+Point `PAN_REGISTRAR` at your registrar if you run your own; unset, the doctor
+checks the public one. An adapter whose `doctor` command is missing predates
+the tool — install the current tarball ([section 1.1](#11-the-pieces) has the
+install line). Steps 2, 5, 6, 9 and 10 remain manual below, and the manual
+versions of 7 and 8 stay for probing by hand.
 
 **1. The broker is up and the services are connected to it.**
 
@@ -708,6 +719,10 @@ the message being published. If it publishes, the broker is not enforcing
 authentication, every credential you minted is decoration, and nothing else on
 this list means anything until the broker config is fixed.
 
+`mesh-adapter doctor` runs this probe as its `refuse-anonymous` check, and it
+reports an unreachable broker as "unknown", never as a pass — a connection that
+failed for network reasons proves nothing about authentication.
+
 **8. A guest credential is denied the subjects that matter.** Skip this if you
 skipped step 3. Save the credential `/v1/guest` returned to a file, then probe a
 privileged subject with it, subscribe and publish separately:
@@ -732,6 +747,10 @@ operator session tokens. On a pool minted by the Compose bootstrap this step
 fails, and that is the point of running it; see the warning in
 [section 2.2](#22-bring-up-a-mesh-with-compose) for why, and what must change
 before the instance is exposed to anyone.
+
+`mesh-adapter doctor` runs both probes as its `guest-fence` check: it watches
+the connection's status stream for the violations, one probe at a time, and
+fails on silence — so the trap above cannot be fallen into by not looking.
 
 **9. The mesh still behaves.** Run the conformance suites —
 [R15](#r15-prove-the-deployment-is-behaving), and read its warning about the
