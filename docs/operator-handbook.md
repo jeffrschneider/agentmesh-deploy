@@ -1947,12 +1947,13 @@ and the adapter falls back to `hold`/`block` with no entries. Every agent goes
 deaf and nothing looks broken.
 [R14](#r14-change-an-admission-roster).
 
-**6. A shell script copied to a Linux host needs LF endings.** This repository has
-no `.gitattributes`, so a Windows clone can check out `compose/bootstrap.sh` with
-CRLF and Compose will fail on the carriage return. The symptom is a `command not
-found` naming a command you can see is there, because `bash` reads the carriage
-return as part of the command name, or the shebang line simply is not a shebang.
-Fix: `sed -i 's/\r$//' <file>`.
+**6. A shell script copied to a Linux host needs LF endings.** This repository's
+`.gitattributes` pins `*.sh` to LF, so a clean clone is safe — but a script that
+reached the host any other way (pasted into an editor, mailed, copied off a
+Windows share) can still carry CRLF, and Compose will fail on the carriage
+return. The symptom is a `command not found` naming a command you can see is
+there, because `bash` reads the carriage return as part of the command name, or
+the shebang line simply is not a shebang. Fix: `sed -i 's/\r$//' <file>`.
 
 The registrar's migration files are pinned the other way, as binary, and the
 failure mode is different — a boot crash-loop on a version mismatch.
