@@ -243,24 +243,25 @@ Which one to choose, and what each costs in availability and in disk, is
 [planning-and-sizing.md §2](planning-and-sizing.md#2-infrastructure-shapes). What
 follows is what each shape *is*, so that the runbooks below make sense.
 
-**Docker Compose.** [`compose/`](../compose/) in this repository — six containers
-(`bootstrap`, `nats`, `services`, `console`, `eval-agent`, `bridge`) and three
-named volumes. `bootstrap` runs `nsc` once to mint the whole credential chain and
-write `/data/nats.conf`, then exits; `services` mounts that volume read-only. No
-TLS, no ingress, no registrar, no agents. Right for evaluating, for a private
-mesh behind a firewall, and for a branch office. The last two containers are the
-A2A pair, and one thing about them is worth knowing before you `up`:
-`bootstrap.sh` short-circuits on
-an existing install, so a mesh brought up before they were added has no
-`bridge.creds` and must mint one by hand — the command is in
-[`compose/README.md`](../compose/README.md#upgrading-an-existing-deployment).
+**Docker Compose.** [`compose/`](../compose/) in this repository — seven
+containers (`bootstrap`, `mint`, `nats`, `services`, `console`, `eval-agent`,
+`bridge`) and three named volumes. `bootstrap` runs `nsc` once to mint the
+operator → account chain and write `/data/nats.conf`, then exits; `mint` runs
+the services image once to mint every user credential from the platform's
+least-privilege templates, then exits; `services` mounts the volume read-only.
+No TLS, no ingress, no registrar, no agents. Right for evaluating, for a
+private mesh behind a firewall, and for a branch office. The mint is
+idempotent per file, so a mesh brought up before a credential existed
+(`bridge.creds` was the classic case) gains it on the next `up` instead of
+needing a hand command.
 
 **Kubernetes.** [`kubernetes/mesh.yaml`](../kubernetes/mesh.yaml) — a 3-replica
 NATS StatefulSet with Raft clustering and a 10Gi PVC per replica, `services` as a
 1-replica Deployment with a 1Gi state PVC, `console` at 2 replicas, and the A2A
 pair (`bridge` pinned at 1, `eval-agent` elastic). Credentials are minted on a
-workstation with `nsc` and loaded as Kubernetes Secrets; there is deliberately no
-bootstrap container. There is no Namespace object and no Ingress object in the
+workstation — the account chain with `nsc`, the user credentials with the
+platform's mint run locally — and loaded as Kubernetes Secrets; there is
+deliberately no bootstrap container. There is no Namespace object and no Ingress object in the
 manifest — you create both. If you do put an ingress in front of the bridge,
 `TRUSTED_PROXIES` must name the ingress pod CIDR and not `loopback`, or every
 caller collapses into one identity and one rate bucket; the manifest says so at
@@ -472,20 +473,22 @@ banner. Extract the pre-minted first agent credential:
 docker run --rm -v agentmesh_mesh-data:/d alpine cat /d/creds/node-1.creds > node-1.creds
 ```
 
-Mint another:
+For more agents, use the console rather than `nsc`: create the agent under
+"Your agents", copy its agent key, and run `agentmesh bootstrap <agent-key>` on
+the agent's host. That path mints a per-agent credential from the platform's
+narrow template, and it works self-hosted because the mint service installs the
+signing key the services need to answer it.
 
-```bash
-docker compose run --rm --entrypoint sh bootstrap -c \
-  'nsc -H /data/.nsc add user -a agents -n node-2 && \
-   nsc -H /data/.nsc generate creds -a agents -n node-2 > /data/creds/node-2.creds'
-```
-
-Nothing needs preparing: `bootstrap` mints the operator → account → user chain on
-first run and is idempotent (it exits if `nats.conf` already exists). The banner
-is printed **once** and only the scrypt hash is kept, so capture it. Every setting
-is optional; copy `.env.example` to `.env` only to change something.
-`PUBLIC_API_URL` and `PUBLIC_NATS_WS_URL` are resolved by the *browser*, so
-Compose service names are wrong values for them.
+Nothing needs preparing: `bootstrap` mints the operator → account chain and the
+server config on first run, then the `mint` service mints every user credential
+— services, node-1, bridge, and the guest pool — from the platform's
+least-privilege templates. Both are idempotent; the mint is idempotent per
+file, so a later `docker compose up mint` mints whatever is missing and
+touches nothing that exists. The banner is printed **once** and only the
+scrypt hash is kept, so capture it. Every setting is optional; copy
+`.env.example` to `.env` only to change something. `PUBLIC_API_URL` and
+`PUBLIC_NATS_WS_URL` are resolved by the *browser*, so Compose service names
+are wrong values for them.
 
 Two things this shape does that a real deployment should not. Credentials are
 shared to the containers that need them through a volume, which is convenient and
@@ -493,43 +496,44 @@ not how secrets should be handled beyond one host; hand them in as secrets
 instead. And accounts live in the config file (a memory resolver), so adding one
 means editing and restarting.
 
-**A third thing, and it is the one that bites strangers: every credential this
-bootstrap mints is unrestricted, the guest pool included.** `bootstrap.sh` runs
-`nsc add user` with no permissions block, and in NATS an empty permissions block
-does not mean "no access". It means the user inherits the account's
-`default_permissions`, and this bootstrap sets none of those either, so the
-effective grant is publish and subscribe to everything in the account. For
-`services` that is close to its job. For `node-1` it is more than a node needs.
-For `guest-1` through `guest-N`, the credentials `/v1/guest` hands to strangers,
-it means a visitor can read other agents' inboxes, drive the JetStream API, and
-read the KV bucket where operator session bearer tokens sit as plaintext keys
-(`$KV.mesh_operator_sessions.>`). Nothing about connecting will warn you: a
-successful connection proves the credential is valid, never that its permissions
-are right, and a NATS denial would arrive as an async status event rather than an
-error anyway ([trap 2](#51-the-traps-first)). Pool rotation does not repair this,
-deliberately: it copies the deployed permission set forward rather than inventing
-one ([R13](#r13-re-mint-the-guest-pool-when-rotation-is-refusing)), so an open
-pool re-mints as an open pool, forever. A shared least-privilege permission
-template for the pool is being prepared and will be published separately; until
-it lands, treat this bundle as what its header says it is, a mesh for evaluating
-and for a private network behind a firewall, and before anyone you do not fully
-trust can reach 4222, 4443 or `/v1/guest`, verify the denies yourself
-([section 2.5](#25-verify-it-is-actually-working), steps 7 and 8).
+On permissions, what the mint installs and what it refuses: the guest pool —
+the credentials `/v1/guest` hands to strangers — is minted from the sandbox
+template and asserted narrow before signing, so a guest credential subscribes
+its own inbox and nothing else's, has no JetStream reach at all, and is denied
+the KV plane where operator session bearer tokens sit as plaintext keys. The
+mint fails loudly rather than sign a pool credential wider than that. `node-1`
+and `bridge` cannot be scoped to agents that do not exist yet, so they are
+minted wide MINUS a fence: the session-token bucket, server monitoring, the
+federation plane and the acl traffic plane are denied outright. Pool rotation
+copies the deployed permission set forward and refuses to widen
+([R13](#r13-re-mint-the-guest-pool-when-rotation-is-refusing)), which now
+works FOR you: a pool born narrow re-mints narrow, forever. Do not take any of
+this on faith — [section 2.5](#25-verify-it-is-actually-working) steps 7 and 8
+are the checks, `mesh-adapter doctor` runs them, and a mesh bootstrapped
+BEFORE the mint split still holds the old unrestricted credentials until you
+run the re-mint-and-revoke ritual in
+[`compose/README.md`](../compose/README.md#upgrading-an-existing-deployment).
 
 ### 2.3 Bring up a mesh on Kubernetes
 
-Credentials first, on a workstation with `nsc` — never in the cluster:
+Credentials first, on a workstation — never in the cluster. The account chain
+comes from `nsc`; the user credentials come from the platform's own mint (the
+services image, run locally), because `nsc add user` with no permission flags
+mints an unrestricted credential:
 
 ```bash
+mkdir -p creds/pool
 nsc -H ./.nsc add operator -n mymesh --sys
 nsc -H ./.nsc add account -n agents
 nsc -H ./.nsc edit account -n agents \
   --js-mem-storage -1 --js-disk-storage -1 --js-streams -1 --js-consumer -1
-nsc -H ./.nsc add user -a agents -n services
-nsc -H ./.nsc generate creds -a agents -n services > creds/services.creds
-nsc -H ./.nsc add user -a agents -n node-1
-nsc -H ./.nsc generate creds -a agents -n node-1 > creds/node-1.creds
 nsc -H ./.nsc generate config --mem-resolver --config-file accounts.conf --force
+
+ACCT=$(nsc -H ./.nsc describe account -n agents --field sub | tr -d '"')
+cp "$(find ./.nsc -name "$ACCT.nk")" creds/mint-signing.nk
+
+docker run --rm -e SANDBOX_POOL_SIZE=3 -v "$PWD/creds":/data/creds \
+  ghcr.io/jeffrschneider/agentmesh-services:<AGENTMESH_VERSION> mint-bootstrap
 ```
 
 Then:
@@ -545,8 +549,13 @@ kubectl -n agentmesh logs deploy/services | grep -A6 "OPERATOR CONSOLE LOGIN"
 
 `kubectl create namespace` is not optional: every object in `mesh.yaml` hardcodes
 `namespace: agentmesh` and the manifest contains no Namespace object. The
-operator signing key never enters Kubernetes, deliberately — whatever holds the
-root of trust has to be something you can lose the cluster without losing.
+operator and account signing keys never enter Kubernetes, deliberately —
+whatever holds the root of trust has to be something you can lose the cluster
+without losing. `creds/mint-signing.nk` stays on the workstation with the
+`.nsc` directory, and the consequence is that an in-cluster mesh cannot sign
+new credentials: the console's agent-key flow and pool rotation do not run
+here, and minting more means running the mint locally again and updating the
+Secrets.
 
 Teardown, in this order, or you leak disks:
 
@@ -569,21 +578,26 @@ throwaway.
 
 If you want the broker under systemd rather than in a container, the same chain
 runs on the host. `compose/bootstrap.sh` in this repository is the reference
-implementation and runs entirely inside `nats-box`, which ships `nsc`, so you need
-no tooling of your own:
+implementation for the account half and runs inside `nats-box`, which ships
+`nsc`; the user credentials come from the platform's mint, run as a second
+container against the same directory:
 
 ```bash
 docker run --rm -v ./mymesh:/data \
   -v ./compose/bootstrap.sh:/bootstrap.sh:ro \
   -e MESH_NAME=<MESH_NAME> natsio/nats-box:0.14.5 sh /bootstrap.sh
+docker run --rm -v ./mymesh:/data \
+  ghcr.io/jeffrschneider/agentmesh-services:<AGENTMESH_VERSION> mint-bootstrap
 nats-server -c ./mymesh/nats.conf
 ```
 
-That produces operator + SYS + an `agents` account with JetStream unlimited, a
-`services` credential, a `node-1` credential, a sandbox pool of
-`SANDBOX_POOL_SIZE` credentials, `accounts.conf`, and a `nats.conf` that includes
-it. Read the script before running it — it is fifty lines and it is the clearest
-statement in this repository of what a mesh's identity actually is.
+The first produces operator + SYS + an `agents` account with JetStream
+unlimited, `accounts.conf`, a `nats.conf` that includes it, and the exported
+account signing key; the second mints a `services` credential, a `node-1`
+credential, a `bridge` credential and a sandbox pool of `SANDBOX_POOL_SIZE`
+credentials from the platform's least-privilege templates. Read the bootstrap
+script before running it — it is the clearest statement in this repository of
+what a mesh's identity actually is.
 
 The generated websocket block says `no_tls: true   # The browser console connects
 here. See the README on TLS.` Believe it. Note also that the generated config sets
@@ -743,9 +757,11 @@ denied either; it means you have not looked yet. The pass condition is seeing th
 explicit violation line for **both** probes, because publish and subscribe are
 separate grants and one can be open while the other is closed. The fail condition
 is data: if the subscribe starts printing keys, the guest credential can read
-operator session tokens. On a pool minted by the Compose bootstrap this step
-fails, and that is the point of running it; see the warning in
-[section 2.2](#22-bring-up-a-mesh-with-compose) for why, and what must change
+operator session tokens. On a pool minted by the current bundle's mint service
+this step passes — both probes draw explicit violations. On a pool minted by a
+bootstrap from before the mint split it FAILS, and that failure is the
+instruction: run the re-mint-and-revoke ritual in
+[`compose/README.md`](../compose/README.md#upgrading-an-existing-deployment)
 before the instance is exposed to anyone.
 
 `mesh-adapter doctor` runs both probes as its `guest-fence` check: it watches
@@ -771,12 +787,12 @@ command.
 **The bridge now requires a credential.** Two different ones, in fact, and it is
 worth being clear which is which:
 
-- Its **mesh** credential is `bridge.creds`, minted by `bootstrap.sh` in Compose
-  and loaded as the `bridge-creds` Secret on Kubernetes. A mesh bootstrapped
-  before the bridge was added does not have one — see
-  [`compose/README.md`](../compose/README.md#upgrading-an-existing-deployment)
-  for the one command that mints it. Without it the bridge exits at startup and
-  this step fails at the connection, not at the call.
+- Its **mesh** credential is `bridge.creds`, minted by the mint service in
+  Compose and loaded as the `bridge-creds` Secret on Kubernetes. A mesh
+  bootstrapped before the bridge was added does not have one — `docker compose
+  up mint` mints any missing credential, including this one. Without it the
+  bridge exits at startup and this step fails at the connection, not at the
+  call.
 - The **caller's** credential is a bridge API key, which is what the command
   below sends. It comes from `BRIDGE_API_KEYS` in `compose/.env` or the
   `bridge-api-keys` Secret on Kubernetes, in `key=label` form; the key is the
@@ -1638,14 +1654,15 @@ newly minted <name> — safe to install`, then `rotated N credentials, valid unt
 <ISO>; previous generation kept in _prev/<stamp>`. Then `curl -fsS -X POST
 $API/v1/guest` returns a credential.
 
-**Minting the pool entirely by hand is not scripted.** The pool is a directory of
-`.creds` files at `CREDS_DIR`, so the shape is `nsc` user JWTs written there — the
-Compose bootstrap's `guest-$i` loop is the simplest example — but the *permission
-set* is the whole safety property, and no file here shows the exact one the
-rotation job installs. Fix the job instead. If you must do it by hand, copy the
-permissions from a deployed pool credential rather than inventing them: that is
-precisely what the rotation code does, and its reason is that a literal template
-"would drift the first time the deployed policy changed".
+**Re-minting the pool by hand is now scripted: it is the mint service.** Delete
+the pool files and run `docker compose up mint`; each credential is minted from
+the platform's sandbox template and asserted narrow before signing, and
+restarting the services makes the pool reload. Rotation still copies the
+deployed permission set forward rather than reading the template — a pool born
+narrow therefore re-mints narrow, and the refuse-to-widen guard above is the
+ratchet that keeps it that way. Never fall back to `nsc add user`: with no
+permission flags that is an unrestricted credential, which is the exact
+mistake the mint exists to end.
 
 ### R14. Change an admission roster
 
@@ -2437,24 +2454,21 @@ systemd unit with no `ExecReload`. If you write your own unit, you decide this.
 nothing here can tell you how a registrar you build should be configured. With
 `DATABASE_URL` unset it starts an embedded Postgres, which is a rig-only path.
 
-**Manual guest-pool minting is not scripted, and the pool the Compose bootstrap
-mints is wide open.** The bootstrap's guest loop shows the shape but not the
-permission set, and the permission set is the whole safety property. What the
-bootstrap actually installs is not merely unspecified: `nsc add user` with no
-permissions block mints a user that inherits the account's
-`default_permissions`, the bootstrap sets none of those, and the result is a
-guest credential that can publish and subscribe almost anywhere in the account,
-including the KV bucket holding operator session bearer tokens as plaintext keys.
-"It connected fine" is not evidence to the contrary: connecting proves
-authentication, never authorization, and a denial would arrive as an async
-status event rather than an error ([trap 2](#51-the-traps-first)). Rotation then
-copies the deployed permissions forward rather than inventing new ones, so the
-open grant renews itself on schedule. The full statement of what this means for
-an exposed instance, and what to do before exposing one, is in
-[section 2.2](#22-bring-up-a-mesh-with-compose); the least-privilege template
-that closes it is being prepared and will be published separately.
-[R13](#r13-re-mint-the-guest-pool-when-rotation-is-refusing) explains why fixing
-the rotation job, not hand-minting, is the right lever.
+**Meshes bootstrapped before the mint split still hold unrestricted
+credentials, and nothing will tell them.** The current bundle mints its pool
+narrow from the platform's sandbox template, but a pool minted by an older
+bootstrap's `nsc add user` loop inherits the account's `default_permissions` —
+publish and subscribe almost anywhere in the account, including the KV bucket
+holding operator session bearer tokens as plaintext keys — and rotation copies
+that width forward on schedule. "It connected fine" is not evidence to the
+contrary: connecting proves authentication, never authorization, and a denial
+would arrive as an async status event rather than an error
+([trap 2](#51-the-traps-first)). The detector is
+[section 2.5](#25-verify-it-is-actually-working) step 8, which
+`mesh-adapter doctor` runs; the fix is the re-mint-and-revoke ritual in
+[`compose/README.md`](../compose/README.md#upgrading-an-existing-deployment),
+and replacing the files without the revocation half leaves the old no-expiry
+JWTs working from wherever they were copied.
 
 **The adapter install step on a host running several agents is not scripted
 here.** Nothing in this bundle installs or pins an adapter version on a node.

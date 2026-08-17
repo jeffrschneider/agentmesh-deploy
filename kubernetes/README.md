@@ -1,27 +1,38 @@
 # A mesh on Kubernetes
 
 The credentials come from outside the cluster. Generate the operator chain on a
-workstation with `nsc`, then load only the derived credentials as Secrets. The
-operator signing key never enters Kubernetes, because whatever holds the root of
-trust has to be something you can lose the cluster without losing.
+workstation with `nsc`, mint the user credentials with the platform's own mint
+(the services image, run locally), then load only the derived credentials as
+Secrets. The operator and account signing keys never enter Kubernetes, because
+whatever holds the root of trust has to be something you can lose the cluster
+without losing.
+
+User credentials are deliberately NOT minted with `nsc add user`: with no
+permission flags that is an unrestricted credential (an empty permissions block
+inherits the account's defaults), and the guest pool goes to strangers. The
+mint below uses the same least-privilege templates the hosted platform mints
+from, and refuses to sign a pool credential that is not narrow.
 
 ```
+mkdir -p creds/pool
 nsc -H ./.nsc add operator -n mymesh --sys
 nsc -H ./.nsc add account -n agents
 nsc -H ./.nsc edit account -n agents \
   --js-mem-storage -1 --js-disk-storage -1 --js-streams -1 --js-consumer -1
-nsc -H ./.nsc add user -a agents -n services
-nsc -H ./.nsc generate creds -a agents -n services > creds/services.creds
-nsc -H ./.nsc add user -a agents -n node-1
-nsc -H ./.nsc generate creds -a agents -n node-1 > creds/node-1.creds
-nsc -H ./.nsc add user -a agents -n bridge
-nsc -H ./.nsc generate creds -a agents -n bridge > creds/bridge.creds
-for i in 1 2 3; do
-  nsc -H ./.nsc add user -a agents -n guest-$i
-  nsc -H ./.nsc generate creds -a agents -n guest-$i > creds/pool/guest-$i.creds
-done
 nsc -H ./.nsc generate config --mem-resolver --config-file accounts.conf --force
+
+# Hand the account signing seed to the mint. It stays in this directory, on
+# this workstation — nothing below loads it into the cluster.
+ACCT=$(nsc -H ./.nsc describe account -n agents --field sub | tr -d '"')
+cp "$(find ./.nsc -name "$ACCT.nk")" creds/mint-signing.nk
+
+# services, node-1, bridge, and a pool of 3, minted from the templates.
+docker run --rm -e SANDBOX_POOL_SIZE=3 -v "$PWD/creds":/data/creds \
+  ghcr.io/jeffrschneider/agentmesh-services:<version> mint-bootstrap
 ```
+
+`<version>` is the version `mesh.yaml` pins. The mint is idempotent per file:
+run it again after raising the pool size and it mints only the missing ones.
 
 Then:
 
@@ -35,6 +46,13 @@ kubectl -n agentmesh create secret generic bridge-api-keys --from-literal=api-ke
 kubectl -n agentmesh apply -f mesh.yaml
 kubectl -n agentmesh logs deploy/services | grep -A6 "OPERATOR CONSOLE LOGIN"
 ```
+
+Note what was NOT loaded: `creds/mint-signing.nk` stays on the workstation.
+The consequence is deliberate and worth knowing — an in-cluster mesh cannot
+sign new credentials, so the console's agent-key flow (`/v1/bootstrap`) and
+guest-pool rotation do not run here; minting more credentials means running
+the mint on the workstation again and updating the Secrets. That is the
+root-of-trust trade this page opens with, chosen in favour of the key.
 
 The last two are the A2A bridge's, and both are marked optional in the manifest
 so that a missing one leaves a diagnosable pod rather than a stuck one. Without
