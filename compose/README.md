@@ -64,9 +64,9 @@ source by relative path and so needs `sdk-typescript/` in the same context:
 
 ```
 docker build -f eval-agent/Dockerfile \
-  -t ghcr.io/jeffrschneider/agentmesh-eval-agent:0.2.2 .
+  -t ghcr.io/jeffrschneider/agentmesh-eval-agent:0.3.0 .
 docker build -f bridge-a2a/Dockerfile \
-  -t ghcr.io/jeffrschneider/agentmesh-bridge-a2a:0.2.2 .
+  -t ghcr.io/jeffrschneider/agentmesh-bridge-a2a:0.3.0 .
 ```
 
 For whoever cuts a release that adds a NEW image: **a package's first publish
@@ -263,14 +263,25 @@ bootstrap minted its chain, the services connected authenticated, a real
 mesh-adapter joined and registered, and the console was signed into in a browser
 and showed the agent, with no requests to any public AgentMesh endpoint.
 
-**That run predates the `bridge` and `eval-agent` services and does not cover
-them**, so the composition as it stands has not been brought up whole. Both
-images now exist and have been built and run as containers: the eval agent
-answers a real A2A call with the exact value the verification step expects, and
-the bridge starts, binds 8090 and reports `ready:false` from `/healthz` before
-its mesh connection is up — which is what proves `tsx` and the SDK source
-resolved inside the image. The release workflow runs both of those checks on
-every build. What has still not been done: the two of them together, in
-containers, on a mesh, with the bridge holding a credential and its mesh leg
-carrying the request. Treat that last leg as unverified until someone repeats
-the run above with all six containers.
+The mint split was brought up from empty on 2026-08-16 (`bootstrap`, `mint`,
+`nats`, `services`, with a locally built services image at this tree): the
+bootstrap stopped at the account and exported the signing key, the mint minted
+all eight credentials, the services connected and picked the issuer off the
+volume, and `mesh-adapter doctor` passed all six of its live checks against
+the result — including the guest fence, where both probes drew explicit
+permission violations. Re-running bootstrap took the short-circuit path and
+re-running mint reported every credential untouched.
+
+**Neither run covers the composition whole.** The 2026-07-24 run predates the
+`bridge` and `eval-agent` services; the 2026-08-16 run did not start them or
+the console. Both A2A images exist and have been built and run as containers:
+the eval agent answers a real A2A call with the exact value the verification
+step expects, and the bridge starts, binds 8090 and reports `ready:false` from
+`/healthz` before its mesh connection is up — which is what proves `tsx` and
+the SDK source resolved inside the image. The release workflow runs both of
+those checks on every build, and now also decodes a credential from a fresh
+mint and refuses the release if it is wide. What has still not been done: all
+seven containers together, with the bridge holding a credential and its mesh
+leg carrying the request. Treat that leg as unverified until someone runs it —
+`mesh-adapter doctor --bridge http://localhost:8090 --bridge-key <key>` is the
+check.

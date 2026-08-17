@@ -106,7 +106,7 @@ Fill these in once. Nothing below assumes any host but yours.
 | `<REGISTRAR>` | the registrar you point `PAN_REGISTRAR` at. Defaults to `https://naming.agentmesh.ai` | |
 | `<HANDLE>` | a handle on your mesh | `Coder.you@example.com` |
 | `<OPERATOR_EMAIL>` | the email address of an operator who owns room and agent quota | |
-| `<AGENTMESH_VERSION>` | the image tag you pinned. All four AgentMesh images carry one version, are published together, and both bundles pin the same one (`0.2.2` at the time of writing). Do not pin `0.2.1`: its services image cannot build the audit store's path inside the container and exits at boot ([5](#5-troubleshooting)) | |
+| `<AGENTMESH_VERSION>` | the image tag you pinned. All four AgentMesh images carry one version, are published together, and both bundles pin the same one (`0.3.0` at the time of writing — the first whose bundle mints narrow credentials via the mint service). Do not pin `0.2.1`: its services image cannot build the audit store's path inside the container and exits at boot ([5](#5-troubleshooting)) | |
 
 Two shell variables recur, so set them before you start reading:
 
@@ -532,9 +532,12 @@ nsc -H ./.nsc generate config --mem-resolver --config-file accounts.conf --force
 ACCT=$(nsc -H ./.nsc describe account -n agents --field sub | tr -d '"')
 cp "$(find ./.nsc -name "$ACCT.nk")" creds/mint-signing.nk
 
-docker run --rm -e SANDBOX_POOL_SIZE=3 -v "$PWD/creds":/data/creds \
+docker run --rm --user 0 -e SANDBOX_POOL_SIZE=3 -v "$PWD/creds":/data/creds \
   ghcr.io/jeffrschneider/agentmesh-services:<AGENTMESH_VERSION> mint-bootstrap
 ```
+
+(`--user 0` because the image's own unprivileged user cannot write your
+mounted directory; the minted files land world-readable.)
 
 Then:
 
@@ -586,7 +589,7 @@ container against the same directory:
 docker run --rm -v ./mymesh:/data \
   -v ./compose/bootstrap.sh:/bootstrap.sh:ro \
   -e MESH_NAME=<MESH_NAME> natsio/nats-box:0.14.5 sh /bootstrap.sh
-docker run --rm -v ./mymesh:/data \
+docker run --rm --user 0 -v ./mymesh:/data \
   ghcr.io/jeffrschneider/agentmesh-services:<AGENTMESH_VERSION> mint-bootstrap
 nats-server -c ./mymesh/nats.conf
 ```

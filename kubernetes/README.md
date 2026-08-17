@@ -27,7 +27,8 @@ ACCT=$(nsc -H ./.nsc describe account -n agents --field sub | tr -d '"')
 cp "$(find ./.nsc -name "$ACCT.nk")" creds/mint-signing.nk
 
 # services, node-1, bridge, and a pool of 3, minted from the templates.
-docker run --rm -e SANDBOX_POOL_SIZE=3 -v "$PWD/creds":/data/creds \
+# --user 0 because the image's own user cannot write your mounted directory.
+docker run --rm --user 0 -e SANDBOX_POOL_SIZE=3 -v "$PWD/creds":/data/creds \
   ghcr.io/jeffrschneider/agentmesh-services:<version> mint-bootstrap
 ```
 

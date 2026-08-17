@@ -320,7 +320,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: services
-          image: ghcr.io/jeffrschneider/agentmesh-services:0.2.2
+          image: ghcr.io/jeffrschneider/agentmesh-services:0.3.0
           env:
             - name: NATS_URL
               value: nats://nats-client.agentmesh.svc.cluster.local:4222
@@ -419,7 +419,7 @@ spec:
     spec:
       containers:
         - name: console
-          image: ghcr.io/jeffrschneider/agentmesh-console:0.2.2
+          image: ghcr.io/jeffrschneider/agentmesh-console:0.3.0
           env:
             # Resolved by the BROWSER, so these are the addresses a user's
             # machine can reach, never in-cluster service names. Set them to
@@ -481,7 +481,7 @@ spec:
     spec:
       containers:
         - name: eval-agent
-          image: ghcr.io/jeffrschneider/agentmesh-eval-agent:0.2.2
+          image: ghcr.io/jeffrschneider/agentmesh-eval-agent:0.3.0
           env:
             # Set explicitly rather than inherited from the image, so that this
             # and containerPort below cannot drift apart.
@@ -571,7 +571,7 @@ spec:
     spec:
       containers:
         - name: bridge
-          image: ghcr.io/jeffrschneider/agentmesh-bridge-a2a:0.2.2
+          image: ghcr.io/jeffrschneider/agentmesh-bridge-a2a:0.3.0
           env:
             # The SDK speaks NATS over WebSocket, so 4443 and not 4222.
             - name: MESH_URL
