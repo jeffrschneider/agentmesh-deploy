@@ -45,6 +45,25 @@ domain your agents' handles are anchored to.
 
 ## Checking it is up
 
+The whole post-install check is one command. The adapter ships a doctor that
+runs the verification checklist as a program — API health, guest issue,
+registrar, and the two refusal checks people skip: the broker must refuse a
+connection with no credential, and a guest credential must draw explicit
+permission violations on the subjects it is fenced off. It treats silence as
+failure, because a NATS permission denial arrives as an async status event
+rather than an error, and it exits nonzero unless every check got a positive
+answer:
+
+```bash
+MESH_URL=ws://<host>:4443 MESH_GUEST_URL=http://<host>:3001/v1/guest \
+  npx "https://storage.googleapis.com/agentmesh-releases/mesh-adapter-$(curl -fsS https://storage.googleapis.com/agentmesh-releases/mesh-adapter-latest.txt).tgz" doctor
+```
+
+The manual version of the same checklist, and what each check rules out, is
+[handbook section 2.5](docs/operator-handbook.md#25-verify-it-is-actually-working).
+
+For ongoing monitoring:
+
 ```bash
 curl -fsS http://<host>:3001/health
 ```
@@ -123,8 +142,10 @@ explicit list of what it could not verify.
 
 | | |
 |---|---|
-| `ghcr.io/jeffrschneider/agentmesh-services` | registry, task manager, catalog, activity, rooms, admission, api gateway |
+| `ghcr.io/jeffrschneider/agentmesh-services` | registry, task manager, catalog, activity, rooms, admission, api gateway — and the credential mint the bundles call |
 | `ghcr.io/jeffrschneider/agentmesh-console` | the operator console, the same app as console.agentmesh.ai |
+| `ghcr.io/jeffrschneider/agentmesh-bridge-a2a` | the A2A bridge: stock A2A clients reach mesh agents, and A2A servers appear on the mesh |
+| `ghcr.io/jeffrschneider/agentmesh-eval-agent` | a deterministic A2A agent the verification checklist calls |
 | `nats:2.10-alpine` | the broker, with JetStream for durable state |
 
 Pin a version rather than tracking `latest`, so an unattended restart cannot

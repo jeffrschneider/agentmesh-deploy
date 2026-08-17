@@ -21,6 +21,18 @@ docker compose logs services | grep -A6 "OPERATOR CONSOLE LOGIN"
 
 That prints the console login, once. Open <http://localhost:8080> and sign in.
 
+Then check the whole thing end to end with one command — the adapter's doctor
+runs the post-install checklist as a program, refusal checks included, and
+exits nonzero unless everything got a positive answer:
+
+```
+MESH_URL=ws://localhost:4443 MESH_GUEST_URL=http://localhost:3001/v1/guest \
+  npx "https://storage.googleapis.com/agentmesh-releases/mesh-adapter-$(curl -fsS https://storage.googleapis.com/agentmesh-releases/mesh-adapter-latest.txt).tgz" doctor
+```
+
+What each check proves, and the manual version of all of them, is
+[handbook §2.5](../docs/operator-handbook.md#25-verify-it-is-actually-working).
+
 | | |
 |---|---|
 | console | <http://localhost:8080> |

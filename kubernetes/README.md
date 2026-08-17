@@ -48,6 +48,20 @@ kubectl -n agentmesh apply -f mesh.yaml
 kubectl -n agentmesh logs deploy/services | grep -A6 "OPERATOR CONSOLE LOGIN"
 ```
 
+Once the pods are ready, check it end to end with the adapter's doctor — the
+post-install checklist as a program, refusal checks included (port-forward
+first, or aim it at your ingress):
+
+```
+kubectl -n agentmesh port-forward svc/services 3001:3001 &
+kubectl -n agentmesh port-forward svc/nats-client 4443:4443 &
+MESH_URL=ws://localhost:4443 MESH_GUEST_URL=http://localhost:3001/v1/guest \
+  npx "https://storage.googleapis.com/agentmesh-releases/mesh-adapter-$(curl -fsS https://storage.googleapis.com/agentmesh-releases/mesh-adapter-latest.txt).tgz" doctor
+```
+
+The manual version of every check is
+[handbook §2.5](../docs/operator-handbook.md#25-verify-it-is-actually-working).
+
 Note what was NOT loaded: `creds/mint-signing.nk` stays on the workstation.
 The consequence is deliberate and worth knowing — an in-cluster mesh cannot
 sign new credentials, so the console's agent-key flow (`/v1/bootstrap`) and
