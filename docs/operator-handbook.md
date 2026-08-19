@@ -2320,8 +2320,8 @@ in [planning-and-sizing.md §3](planning-and-sizing.md#3-sizing-and-what-binds-f
 | Limit | Default | Env var | Worth changing when |
 |---|---|---|---|
 | Message size | 1 MB | none (hardcoded) | Matches the NATS default and the advertised `max_message_bytes`. Larger payloads go to the object store as an artifact `ref` (SPEC §18.9). |
-| Agents per account | 10 | `MAX_AGENTS_PER_ACCOUNT` | Refused at mint time. |
-| Apps per account | = agents cap | `MAX_APPS_PER_ACCOUNT` | |
+| Agents per account | 30 | `MAX_AGENTS_PER_ACCOUNT` | Refused at mint time. |
+| Apps per account | 10 | `MAX_APPS_PER_ACCOUNT` | No longer follows the agents cap: every app credential comes out of the shared sandbox pool, so this number costs a shared resource and that one does not. |
 | Fair use, messages/day | 10,000 | `FAIR_USE_MSGS_PER_DAY` | |
 | Fair use, bytes/day | 15 MB | `FAIR_USE_BYTES_PER_DAY` | |
 | Durable rooms per operator | 10 | `ROOMS_MAX_PER_OPERATOR` | Ten of ten is why a conformance run skips the ACL-room test rather than passing it. |
