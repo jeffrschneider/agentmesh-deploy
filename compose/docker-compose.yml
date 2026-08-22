@@ -180,6 +180,18 @@ services:
       # Optional: durable history in Postgres for the console's charts. Unset
       # means history is simply not recorded; nothing else changes.
       METRICS_DB_URL: ${METRICS_DB_URL:-}
+      # This mesh's own identity. Each of these has a default inside the image
+      # that points at the AgentMesh hosted instance, so the values here are
+      # what stop a self-hosted mesh advertising somebody else's name, broker
+      # and console. The fallbacks below suit a single machine; see .env.example
+      # for what each one does and handbook §1.5 for the real-hostname versions.
+      MESH_NAME: ${MESH_NAME:-localhost}
+      MESH_NATS_ENDPOINTS: ${MESH_NATS_ENDPOINTS:-nats://localhost:4222,ws://localhost:4443}
+      API_BASE_URL: ${API_BASE_URL:-http://localhost:3001}
+      # The ACCOUNT console, which this container serves on 3001 same-origin
+      # with the API. Not the operator console on 8080.
+      MESH_CONSOLE_URL: ${MESH_CONSOLE_URL:-http://localhost:3001}
+      MESH_CORS_ORIGINS: ${MESH_CORS_ORIGINS:-http://localhost:3001,http://localhost:8080}
     volumes:
       - mesh-data:/data:ro
       - mesh-usage:/var/lib/agentmesh

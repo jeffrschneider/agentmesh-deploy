@@ -35,7 +35,8 @@ What each check proves, and the manual version of all of them, is
 
 | | |
 |---|---|
-| console | <http://localhost:8080> |
+| operator console | <http://localhost:8080> |
+| account console | <http://localhost:3001> — signing in, rooms, orgs and engagements. The api container serves it on its own port, same origin as the API |
 | api | <http://localhost:3001> |
 | mesh | `nats://localhost:4222`, `ws://localhost:4443` |
 | A2A bridge | <http://localhost:8090> |

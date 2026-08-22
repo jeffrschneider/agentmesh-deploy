@@ -91,6 +91,7 @@ Fill these in once. Nothing below assumes any host but yours.
 | `<MESH_HOST>` | the DNS name your broker answers on, as agents and browsers reach it | `mesh.example.com` |
 | `<API_BASE>` | the public HTTPS base of your API gateway. Exported as `$API` in the commands below | `https://api.example.com` |
 | `<CONSOLE_URL>` | the public HTTPS base of your operator console | `https://console.example.com` |
+| `<APP_BASE>` | the public HTTPS base of the account console, which the API serves on its own port. Often the same host as `<API_BASE>` | `https://app.example.com` |
 | `<BRIDGE_BASE>` | the base URL of your A2A bridge, if you run one. Exported as `$BRIDGE` where it is used | `https://a2a.example.com` |
 | `<MESH_WS>` | the browser-reachable NATS WebSocket, TLS-terminated | `wss://mesh.example.com` |
 | `<MESH_NAME>` | the name your mesh advertises in credential responses (`MESH_NAME`) | `example.com` |
@@ -132,7 +133,13 @@ registry, task manager, catalog, activity, rooms, admission — plus the HTTP AP
 gateway that fronts all of them. It can be split with `--service=<name>`, but
 every shape in this repository runs them together, on port 3001. The API gateway
 is also the operator surface (`/v1/operator/*`) and the only public health
-endpoint. Published as `ghcr.io/jeffrschneider/agentmesh-services`. **Run exactly
+endpoint. It serves the **account console** as well, on the same port and
+same origin: `/` to sign in and manage an account, `/rooms`, `/orgs`,
+`/engagements` and `/status`. There is no separate image and no build step
+for it. That is a different thing from the operator console described
+below, which is its own static build on its own port, and the two are
+configured by different variables: `MESH_CONSOLE_URL` is the account
+console, `<CONSOLE_URL>` is the operator one. Published as `ghcr.io/jeffrschneider/agentmesh-services`. **Run exactly
 one instance of it.** No subscription in the services tier uses a NATS queue
 group, so a second instance answers every request a second time; the full reason,
 and the two other causes, are in
@@ -285,7 +292,7 @@ Both published shapes pin their images at a version. **Pin, never track
 | 4443 | NATS WebSocket (`no_tls: true` in both bundles) | Browsers. **Must be behind TLS as `<MESH_WS>` before anyone outside your network uses it.** |
 | 6222 | NATS cluster | Kubernetes only |
 | 8222 | NATS monitoring (`/varz`, `/healthz`) | Enabled in the Kubernetes manifest (`http: 8222`); **not** enabled by the Compose bootstrap config, and not published as a Compose port. |
-| 3001 | Platform services HTTP (`API_PORT`) | Behind TLS as `<API_BASE>` |
+| 3001 | Platform services HTTP (`API_PORT`), and the account console on the same port | Behind TLS as `<API_BASE>`, and as `<APP_BASE>` if you give the account console its own hostname |
 | 3000 | Operator console under `serve`, on a VM install | Behind TLS as `<CONSOLE_URL>` |
 | 8080 | Console in both container shapes | Behind TLS as `<CONSOLE_URL>` |
 | 8090 | A2A bridge (`PORT`) | Only if you run it. Public if stock A2A clients call it, and behind TLS if so; `/` and `/healthz` are open, every other route needs a key. |
@@ -447,8 +454,16 @@ instance**, and a self-hosted mesh must set every one of them:
 | `MESH_NAME` | `agentmesh.ai` | `<MESH_NAME>` |
 | `MESH_NATS_ENDPOINTS` | `nats://mesh.agentmesh.ai:4222,ws://mesh.agentmesh.ai:4443` | `nats://<MESH_HOST>:4222,wss://<MESH_HOST>:4443` |
 | `API_BASE_URL` | `http://localhost:<API_PORT>` | `<API_BASE>` — sign-in links are built from this |
-| `MESH_CONSOLE_URL` | `https://app.agentmesh.ai` | `<CONSOLE_URL>` — outbound mail links here |
+| `MESH_CONSOLE_URL` | `https://app.agentmesh.ai` | `<APP_BASE>` — the ACCOUNT console, not the operator console. Outbound mail and the agent-linking URL are built from it, so leaving it unset sends your users to somebody else's mesh |
 | `MESH_CORS_ORIGINS` | a list of `*.agentmesh.ai` origins plus localhost | your console and API origins, comma-separated. `*` is accepted for a deliberately open API |
+
+**Neither bundle sets these for you.** The Compose and Kubernetes shapes start
+without them, so a mesh brought up straight from either one advertises
+`agentmesh.ai` as its name, hands agents the hosted broker's endpoints in
+credential responses, and points outbound mail at the hosted account
+console. Set them in `compose/.env` and in the `services` env block of
+`kubernetes/mesh.yaml` before anyone else uses the deployment. `R5` covers
+where each one goes.
 
 `PAN_REGISTRAR` is the exception: its default, `https://naming.agentmesh.ai`, is a
 public service and a reasonable value to leave alone.

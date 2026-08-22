@@ -336,6 +336,25 @@ spec:
             # and the audit store stopped the container at boot.
             - name: MESH_DATA_DIR
               value: /var/lib/agentmesh
+            # This mesh's own identity. Each of these has a default inside the
+            # image that points at the AgentMesh hosted instance, so leaving
+            # them out makes this cluster advertise somebody else's name, hand
+            # agents the hosted broker's addresses in credential responses, and
+            # put hosted-console links in outbound mail. The values below are
+            # in-cluster placeholders: replace them with the hostnames you
+            # terminate TLS on before anyone outside the cluster uses this.
+            - name: MESH_NAME
+              value: agentmesh.svc.cluster.local
+            - name: MESH_NATS_ENDPOINTS
+              value: nats://nats-client.agentmesh.svc.cluster.local:4222,ws://nats-client.agentmesh.svc.cluster.local:4443
+            - name: API_BASE_URL
+              value: http://services.agentmesh.svc.cluster.local:3001
+            # The ACCOUNT console, which this same container serves on 3001 on
+            # the same origin as the API. Not the operator console Deployment.
+            - name: MESH_CONSOLE_URL
+              value: http://services.agentmesh.svc.cluster.local:3001
+            - name: MESH_CORS_ORIGINS
+              value: http://localhost:3001,http://localhost:8080
             # Sign-in mail. The image bakes NODE_ENV=production in, and in
             # production the services refuse to start without RESEND_API_KEY,
             # because the fallback mailer prints working sign-in links. This
