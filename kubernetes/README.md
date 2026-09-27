@@ -69,6 +69,15 @@ guest-pool rotation do not run here; minting more credentials means running
 the mint on the workstation again and updating the Secrets. That is the
 root-of-trust trade this page opens with, chosen in favour of the key.
 
+That describes `0.3.0`, the version `mesh.yaml` pins, which still lends the
+guest pool (the `sandbox-pool` Secret) and connects the operator console on a
+guest credential. Services from 2026-09-27 retire the pool, and the services
+then mint the console's own connection and every app credential with the
+account signing key. Without that key in the cluster the console signs in and
+then cannot connect to the mesh, so moving this manifest to such a release means
+choosing between the key in the cluster and those features
+([handbook §2.3](../docs/operator-handbook.md#23-bring-up-a-mesh-on-kubernetes)).
+
 The last two are the A2A bridge's, and both are marked optional in the manifest
 so that a missing one leaves a diagnosable pod rather than a stuck one. Without
 `bridge-creds` the bridge cannot reach the mesh; without `bridge-api-keys` it

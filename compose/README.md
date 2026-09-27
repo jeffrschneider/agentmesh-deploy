@@ -33,6 +33,13 @@ MESH_URL=ws://localhost:4443 MESH_GUEST_URL=http://localhost:3001/v1/guest \
 What each check proves, and the manual version of all of them, is
 [handbook §2.5](../docs/operator-handbook.md#25-verify-it-is-actually-working).
 
+This bundle pins `0.3.0`, which still lends the guest pool to strangers through
+`POST /v1/guest` and connects the operator console on a guest credential.
+Services from 2026-09-27 retire the pool: that door answers 410, apps and the
+console get credentials of their own, and the pool the mint writes is lent to
+nobody. What changes, and how to finish removing a pool that was lent, is in
+[the handbook](../docs/operator-handbook.md#r13-finish-removing-a-retired-guest-pool).
+
 | | |
 |---|---|
 | operator console | <http://localhost:8080> |

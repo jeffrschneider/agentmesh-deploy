@@ -88,8 +88,8 @@ working. What you rewrite is your own runbooks, not the mesh. Changing the
 broker's replica count is a migration rather than an edit, for the reasons in
 [section 2.2](#22-clustered-within-one-region).
 
-**Cheap: nearly everything else.** The guest sandbox is an empty directory away
-from off. Postgres for history can be added any time, with no backfill. Whether
+**Cheap: nearly everything else.** Postgres for history can be added any time,
+with no backfill. Whether
 the console is internet-facing is a choice between a certificate and an SSH
 tunnel. The image version is a tag. Artifact storage is portable for new
 artifacts, though the bytes already written do not follow.
@@ -101,14 +101,14 @@ artifacts, though the bytes already written do not follow.
 | **Deployment shape**: Compose, Kubernetes, or a VM with a process manager | Where the pieces run, how you restart them, how secrets arrive | Moderate. The mesh's identity is portable: the keystore and the account JWTs move between shapes, so agents keep working. You rewrite your own runbooks, not the mesh. |
 | **Broker node count**: one server, or a clustered set | Whether losing one machine takes the transport down with it | Moderate, and it is a migration rather than an edit. Scaling in has an ordering you have to follow. [Section 2.2](#22-clustered-within-one-region). |
 | **A real domain with TLS** | Whether anyone outside your network can use it at all. Not optional, see [1.3](#13-the-five-that-deserve-more-than-a-row) | Low to do, but everything downstream embeds it: sign-in links, the console's WebSocket URL, CORS. Changing the domain later means reissuing links and re-pointing clients. |
-| **User accounts, and therefore mail** | Whether humans sign in, own agents, and hold quota, or whether the mesh is sandbox-only | High, and today it is a code change rather than a configuration one. See [1.3](#13-the-five-that-deserve-more-than-a-row). |
+| **User accounts, and therefore mail** | Whether humans sign in, own agents, and hold quota, or whether you mint every agent's credential yourself | High, and today it is a code change rather than a configuration one. See [1.3](#13-the-five-that-deserve-more-than-a-row). |
 | **Artifact storage**: `nats`, `fs`, or an object store | Where room artifact bytes physically live | Low for new artifacts, but there is no migration: bytes already written to one backend are not visible through another. Switch early or accept a cut-over. |
 | **Names**: run a registrar, point at one, or skip handles | Whether agents are addressable by `<HANDLE>` or only by raw key | Low. `PAN_REGISTRAR` is one variable. But the anchor domain is not, and a handle already bound to a key and pinned by other nodes cannot be re-homed casually ([R17](operator-handbook.md#r17-confirm-a-refused-handle-rebinding)). |
-| **A public guest sandbox** | Whether strangers can `POST /v1/guest` and get a throwaway credential | Low: an empty pool directory turns it off, and the endpoint answers 503 rather than breaking. But arming it means owning the pool's expiry and rotation forever ([R13](operator-handbook.md#r13-re-mint-the-guest-pool-when-rotation-is-refusing)). |
+| **Whether unnamed agents may join**: `MESH_REQUIRE_NAMES` | Whether the platform refuses to register an agent, or issue it a credential, until its owner has given it a verified name | Low: it is one setting and applies at once. But with it off, the node-credential door still mints for a key no account holds, and turning it on later refuses every agent nobody named, so name them first ([handbook 2.1](operator-handbook.md#21-what-must-exist-before-anything-runs)). Services from 2026-09-27 have no public guest sandbox to decide about: `POST /v1/guest` answers 410. |
 | **Postgres** | The registrar requires it. The history recorder wants it and works without it | Low for the recorder: set `METRICS_DB_URL` any time and charts start recording from then on. There is no backfill. |
 | **Is the console internet-facing** | Whether you need TLS and a public hostname for it, or only an SSH tunnel | Low. Loopback is exempt from the TLS refusal, so `ssh -L 3000:localhost:3000 <host>` is a complete answer and needs no certificate. |
 | **Where the operator keystore backup lives** | Whether the mesh survives losing its host | **No undo.** See [1.3](#13-the-five-that-deserve-more-than-a-row). |
-| **The account resolver**: memory, or directory/URL | Whether adding an account or revoking a credential needs a broker restart | High. Both bundles here use a memory resolver: accounts are literal JWT text in the config file. Moving to a directory resolver later is a broker reconfiguration and a restart, and it is the only way to satisfy the spec's requirement that revocation not restart the mesh ([SPEC §4.8](https://dev.agentmesh.ai/spec.html)). |
+| **The account resolver**: memory, or directory/URL | Whether adding an account or revoking a credential needs a broker restart | High. Both bundles here use a memory resolver: accounts are literal JWT text in the config file. Moving to the full resolver later is a broker reconfiguration and one restart, and it is the only way to satisfy the spec's requirement that revocation not restart the mesh ([SPEC §4.8](https://dev.agentmesh.ai/spec.html)). Services from 2026-09-27 push revocations live on it ([R12](operator-handbook.md#r12-revoke-a-credential-and-why-that-is-not-rotation)). |
 | **Pinned service identities**: the `*_SEED` files | Whether a client can hard-check that a reply claiming to be from the registry actually is | Low to add, mildly disruptive to change. Without them each service generates a fresh keypair on **every restart** and clients can only pin-and-warn. Adding one later is fine; rotating one makes every client that pinned the old key log a mismatch. Install them on day one. |
 | **Replica count for the services** | Nothing, today. One is the only supported value | Not a dial. Three separate properties of the current build make a second instance wrong rather than slow, and one of them makes it actively incorrect. [Section 4.3](#43-the-second-limit-the-services-tier-cannot-go-past-one-replica). |
 | **Which image version you pin** | What you are running after an unattended restart | Low, and this is the point of pinning. `0.2.0` is the only published version at the time of writing. |
@@ -152,7 +152,8 @@ about:
 
 So the honest reading today: **accounts need a provider whose API shape fits the
 one adapter that exists, and a verified sending domain.** If you do not want
-either, a sandbox-and-agents mesh needs no mail at all. That is a real and
+either, a mesh of agents with credentials you mint needs no mail at all. That
+is a real and
 complete deployment: agents connect with credentials you mint, register, discover
 each other, run tasks, and share rooms, none of which touches email. Deciding you
 want human sign-in is deciding to build the services yourself. The handbook's
@@ -500,7 +501,7 @@ This is the step that removes the single point of failure. Everything before it
 improves the broker and the data underneath it and leaves this untouched. With one
 services instance, everything that needs a platform service to answer stops while
 that instance is down: discovery, task creation and updates, room operations,
-admission, the HTTP API, the operator surface, the guest sandbox. Traffic that is
+admission, the HTTP API, the operator surface, credential minting. Traffic that is
 purely between two agents keeps flowing, because the broker carries it and no
 service sits in that path
 ([section 4.3](#43-the-second-limit-the-services-tier-cannot-go-past-one-replica)).
@@ -827,7 +828,7 @@ Everything else with a number on it is in the handbook's limits table, and that
 is the right place for it because those are dials you turn while running rather
 than sizes you plan around: agents per account, fair-use messages and bytes per
 day, durable rooms and drive bytes per operator, artifact size, room record
-size, room idle expiry, the sandbox TTLs and per-IP caps, the reaper intervals,
+size, room idle expiry, the reaper intervals,
 presence limits, and every rate limit with the variable that changes it. Read
 [section 7](operator-handbook.md#7-limits-and-where-they-are-set) once before you
 size anything, because two of those defaults consume the disk budget above:
@@ -957,7 +958,7 @@ though the subscriptions were not
 The availability consequence is worth being explicit about, because it is easy to
 miss. With one services replica, anything that needs a platform service to answer
 stops while that replica is down: discovery, task creation and updates, room
-operations, admission, the HTTP API, the operator surface, and the guest sandbox.
+operations, admission, the HTTP API, the operator surface, and credential minting.
 Traffic that is purely between two agents keeps flowing, because the broker
 carries it and no service sits in that path. So a services restart is a
 control-plane outage rather than a total one, which is a useful thing to know
@@ -1109,8 +1110,10 @@ that if you write your own unit you decide it
 Related, and worth knowing before you plan a maintenance window: no script in
 either bundle ships broker configuration to a running broker. In Compose the
 config is generated once and then yours; in Kubernetes it is a ConfigMap and a
-Secret you edit. So every broker config change, including the account-JWT step of
-a revocation, is a manual edit followed by a restart
+Secret you edit. So every broker config change is a manual edit followed by a
+restart, and so is a revocation on the memory resolver both bundles generate. On
+the full resolver, services from 2026-09-27 push revocations to the running
+broker with no restart
 ([R12](operator-handbook.md#r12-revoke-a-credential-and-why-that-is-not-rotation)).
 
 ### 5.3 Upgrading the services and the console
@@ -1177,8 +1180,9 @@ determines whether your CI tells you the truth.
 order, each ruling out one layer, from the health endpoint through to a real agent
 answering. Run it in that order rather than sampling it. The two steps people skip
 are steps 7 and 8, because they test for a **refusal** rather than a success:
-whether the broker rejects a connection with no credential, and whether a guest
-credential is actually denied the subjects that matter. Those two are the only
+whether the broker rejects a connection with no credential, and whether an
+agent's credential is actually denied the subjects that matter. Those two are
+the only
 checks on the list that can catch a broker running with authentication switched
 off, or a credential minted with the run of the account, and every other check
 passes cheerfully in both of those states. Plan to run them.

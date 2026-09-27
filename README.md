@@ -46,13 +46,11 @@ domain your agents' handles are anchored to.
 ## Checking it is up
 
 The whole post-install check is one command. The adapter ships a doctor that
-runs the verification checklist as a program — API health, guest issue,
-registrar, and the two refusal checks people skip: the broker must refuse a
-connection with no credential, and a guest credential must draw explicit
-permission violations on the subjects it is fenced off. It treats silence as
-failure, because a NATS permission denial arrives as an async status event
-rather than an error, and it exits nonzero unless every check got a positive
-answer:
+runs the verification checklist as a program: API health, the registrar, and
+the refusal check people skip, that the broker refuses a connection with no
+credential. It treats silence as failure, because a NATS permission denial
+arrives as an async status event rather than an error, and it exits nonzero
+unless every check got a positive answer:
 
 ```bash
 MESH_URL=ws://<host>:4443 MESH_GUEST_URL=http://<host>:3001/v1/guest \
@@ -61,6 +59,15 @@ MESH_URL=ws://<host>:4443 MESH_GUEST_URL=http://<host>:3001/v1/guest \
 
 The manual version of the same checklist, and what each check rules out, is
 [handbook section 2.5](docs/operator-handbook.md#25-verify-it-is-actually-working).
+
+The doctor's checks follow its version and the services' version. The images
+these bundles pin, `0.3.0`, still run the guest pool: `POST /v1/guest` hands
+out a credential, and doctors before adapter 0.91.0 check that it does and that
+the credential is fenced (`guest-issue`, `guest-fence`). Services from
+2026-09-27 give out no credential without an account and answer 410 there, and
+the newer doctor checks exactly that (`no-signup-closed`), so it fails against
+`0.3.0`. [The handbook](docs/operator-handbook.md) describes the services from
+2026-09-27 and says what differs on `0.3.0`.
 
 For ongoing monitoring:
 
