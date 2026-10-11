@@ -108,7 +108,7 @@ artifacts, though the bytes already written do not follow.
 | **Postgres** | The registrar requires it. The history recorder wants it and works without it | Low for the recorder: set `METRICS_DB_URL` any time and charts start recording from then on. There is no backfill. |
 | **Is the console internet-facing** | Whether you need TLS and a public hostname for it, or only an SSH tunnel | Low. Loopback is exempt from the TLS refusal, so `ssh -L 3000:localhost:3000 <host>` is a complete answer and needs no certificate. |
 | **Where the operator keystore backup lives** | Whether the mesh survives losing its host | **No undo.** See [1.3](#13-the-five-that-deserve-more-than-a-row). |
-| **The account resolver**: memory, or directory/URL | Whether adding an account or revoking a credential needs a broker restart | High. Both bundles here use a memory resolver: accounts are literal JWT text in the config file. Moving to the full resolver later is a broker reconfiguration and one restart, and it is the only way to satisfy the spec's requirement that revocation not restart the mesh ([SPEC §4.8](https://dev.agentmesh.ai/spec.html)). Services from 2026-09-27 push revocations live on it ([R12](operator-handbook.md#r12-revoke-a-credential-and-why-that-is-not-rotation)). |
+| **The account resolver**: memory, or directory/URL | Whether adding an account or revoking a credential needs a broker restart | High. Both bundles here use a memory resolver: accounts are literal JWT text in the config file. Moving to the full resolver later is a broker reconfiguration and one restart, and it is the only way to satisfy the spec's requirement that revocation not restart the mesh ([SPEC §4.8](https://agentmessaging.ai/spec.html)). Services from 2026-09-27 push revocations live on it ([R12](operator-handbook.md#r12-revoke-a-credential-and-why-that-is-not-rotation)). |
 | **Pinned service identities**: the `*_SEED` files | Whether a client can hard-check that a reply claiming to be from the registry actually is | Low to add, mildly disruptive to change. Without them each service generates a fresh keypair on **every restart** and clients can only pin-and-warn. Adding one later is fine; rotating one makes every client that pinned the old key log a mismatch. Install them on day one. |
 | **Replica count for the services** | Nothing, today. One is the only supported value | Not a dial. Three separate properties of the current build make a second instance wrong rather than slow, and one of them makes it actively incorrect. [Section 4.3](#43-the-second-limit-the-services-tier-cannot-go-past-one-replica). |
 | **Which image version you pin** | What you are running after an unattended restart | Low, and this is the point of pinning. `0.2.0` is the only published version at the time of writing. |
@@ -664,7 +664,7 @@ across regions does not make the data survive losing one.
 
 One distinction to keep clear, because the words collide. Two separate AgentMesh
 instances that talk to each other is **peering**, a protocol-level concept
-specified at <https://dev.agentmesh.ai/spec.html>, where agents visit a host mesh
+specified at <https://agentmessaging.ai/spec.html>, where agents visit a host mesh
 and the meshes remain separate systems with separate identities. That is a
 different thing from one mesh whose brokers happen to sit in several regions.
 Neither is a substitute for the other, and the conformance suite tests peering
@@ -697,7 +697,7 @@ can talk its way past. The API gateway advertises the same figure to clients as
 is consistent across the three places a client meets it. Anything genuinely
 larger than that is supposed to become an artifact: the bytes go to the object
 store and the envelope carries a `ref`
-([SPEC §18.9](https://dev.agentmesh.ai/spec.html)).
+([SPEC §18.9](https://agentmessaging.ai/spec.html)).
 
 Both bundles here now write `max_payload: 1048576` explicitly, the Kubernetes
 ConfigMap and the config `compose/bootstrap.sh` generates. **Read that as a pin,
@@ -1188,7 +1188,7 @@ off, or a credential minted with the run of the account, and every other check
 passes cheerfully in both of those states. Plan to run them.
 
 **The conformance suites are public and separate from this bundle.** They live
-with the protocol, at <https://github.com/jeffrschneider/agentmesh-protocol>,
+with the protocol, at <https://github.com/jeffrschneider/agent-messaging>,
 under `conformance/core` and `conformance/peering`. Core exercises the protocol
 against your mesh; peering exercises the two-mesh behaviour described in
 [2.3](#23-more-than-one-region). Run them with

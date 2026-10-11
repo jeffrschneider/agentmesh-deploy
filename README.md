@@ -195,7 +195,8 @@ those secrets in the clear, which is the intended behaviour if you do not want i
   <https://github.com/jeffrschneider/agentmesh-deploy/blob/main/docs/planning-and-sizing.md>
 - Operator handbook: [docs/operator-handbook.md](docs/operator-handbook.md) —
   <https://github.com/jeffrschneider/agentmesh-deploy/blob/main/docs/operator-handbook.md>
-- Protocol specification: <https://dev.agentmesh.ai/spec.html>
+- Protocol specification, Agent Messaging (formerly the AgentMesh Protocol):
+  <https://agentmessaging.ai/spec.html>
 - Naming specification: <https://dev.agentmesh.ai/naming-spec.html>
 - Running a mesh: <https://dev.agentmesh.ai/running-a-mesh.html>
 - Reporting a security issue: use GitHub private vulnerability reporting at

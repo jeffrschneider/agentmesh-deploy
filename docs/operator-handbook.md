@@ -1804,7 +1804,7 @@ to a running broker: in Compose the config is generated once by `bootstrap.sh` a
 then owned by you, in Kubernetes it is a ConfigMap plus a Secret you edit. Keep a
 copy of the current config before you change it. This path restarts the broker
 and drops every connection on the mesh, which is why
-[SPEC §4.8](https://dev.agentmesh.ai/spec.html) requires the other one. See
+[SPEC §4.8](https://agentmessaging.ai/spec.html) requires the other one. See
 [section 8](#8-where-this-handbook-is-uncertain).
 
 Two things that are *not* revocation, so you do not reach for the wrong tool.
@@ -1920,12 +1920,12 @@ path silently creates a nested object and changes nothing at all.
 ### R15. Prove the deployment is behaving
 
 The conformance suite is not part of this deployment bundle. It lives with the
-protocol, publicly, at https://github.com/jeffrschneider/agentmesh-protocol,
+protocol, publicly, at https://github.com/jeffrschneider/agent-messaging,
 under `conformance/core` and `conformance/peering`. This is how it runs:
 
 ```bash
-git clone https://github.com/jeffrschneider/agentmesh-protocol
-cd agentmesh-protocol/conformance/peering
+git clone https://github.com/jeffrschneider/agent-messaging
+cd agent-messaging/conformance/peering
 npm install                    # required even to run the CORE suite
 
 export MESH_WS_URL=<MESH_WS>
@@ -2456,7 +2456,7 @@ asserted in the envelope and verified by signature, not by the transport.
 
 `mesh.peer.{instance}.>` is reserved: no agent, node or service may publish or
 subscribe under it until federation specifies its use
-([SPEC §14.1](https://dev.agentmesh.ai/spec.html)).
+([SPEC §14.1](https://agentmessaging.ai/spec.html)).
 
 Connection-bound registration: `mesh.registry.register.{node_id}` puts the
 publishing credential's own key in the subject, so a credential whose publish
@@ -2703,7 +2703,7 @@ work you have to do; nothing here does it. The only backup either bundle argues
 for is the operator keystore, and that is manual-on-change.
 
 **The bundles do not meet the spec's revocation rule.**
-[SPEC §4.8](https://dev.agentmesh.ai/spec.html) says node revocation MUST be
+[SPEC §4.8](https://agentmessaging.ai/spec.html) says node revocation MUST be
 achievable without restarting the mesh servers. Services from 2026-09-27 do it
 live on a broker running NATS's full resolver, with an operator signing key and
 a SYSTEM credential installed
@@ -2757,7 +2757,7 @@ in [section 3](#3-what-you-owe-it) need a context or explicit credentials, and n
 file here sets one up. Confirm the bucket's contents before deleting from it.
 
 **Nothing schedules a conformance run.** The suite itself is public at
-https://github.com/jeffrschneider/agentmesh-protocol
+https://github.com/jeffrschneider/agent-messaging
 ([R15](#r15-prove-the-deployment-is-behaving)), but neither bundle here runs it
 on any schedule, and a run is only as true as its environment: the suite's
 endpoint defaults point at the reference instance, so a scheduled run that loses
