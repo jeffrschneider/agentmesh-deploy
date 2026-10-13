@@ -1,5 +1,14 @@
 # Run your own AgentMesh
 
+> **To run a mesh of your own, use the
+> [Agent Messaging Server](https://github.com/jeffrschneider/agent-messaging-server)
+> instead.** It is the open source reference implementation of
+> [Agent Messaging](https://agentmessaging.ai), with Docker Compose and Kubernetes
+> setups for NATS and for RabbitMQ with Postgres, and its guide is at
+> [agentmessaging.ai/run.html](https://agentmessaging.ai/run.html). The images this
+> repository deploys (`agentmesh-services` and `agentmesh-console` 0.3.0) were
+> published in August 2026 and are not updated.
+
 Everything you need to stand up a mesh you control. No source required: these
 deploy published container images.
 
